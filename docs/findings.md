@@ -80,9 +80,9 @@ Not covered by undo:
 Everything else is covered: all other `add*()` calls, `removeEntity()`, `updateData()` (via
 `updateEntity`), and `move`/`moveRotate`/`rotate`/`scale` (via `addToUndo`).
 
-**Confirmed in the running application 2026-10-04.** *Plugins → Python Bridge: Undo probe* drew
-nine entities through eight separate `add*()` calls, and a single Ctrl+Z removed all nine. The
-reference-counted nesting behaves as the source says.
+**Confirmed in the running application 2026-10-04.** A probe action (since removed from the
+plugin menu) drew nine entities through eight separate `add*()` calls, and a single Ctrl+Z removed
+all nine. The reference-counted nesting behaves as the source says.
 
 ---
 

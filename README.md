@@ -42,23 +42,11 @@ happen silently.
 
 ## Using it
 
-Open a drawing, then look under **Plugins**. Plugin menu entries are disabled while no drawing is
-open.
-
-- **Python Bridge: Report document** — current layer, all layers and blocks, layer properties, and
-  an entity census by type, plus the `cmd` string LibreCAD passed to `execComm()`. Exercises the
-  read side of the API.
-- **Python Bridge: Undo probe** — draws nine entities on a layer named `LC_PYBRIDGE_PROBE` using
-  eight different creation calls, then explains what undo should do. One press of Ctrl+Z removes
-  all nine; confirmed interactively, see `docs/findings.md` risk 1. The `LC_PYBRIDGE_PROBE` layer
-  itself is not removed, because `setLayer()` creates layers outside the undo system.
-- **Python Bridge: Dispatch self-test** — runs the whole operation table against the open drawing
-  and shows a pass/fail report. It draws into a layer called `LC_BRIDGE_SELFTEST` and then moves,
-  rotates, scales, rewrites, and deletes some of what it drew, so run it on a scratch drawing. All
-  of it is one undo step.
-- **Python Bridge: Start bridge session** — opens the bridge socket and serves Python clients until
-  you press *Stop session* or a client sends `{"op": "shutdown"}`. LibreCAD stays usable while the
-  session runs. Everything the session does is **one undo step**, by design.
+Open a drawing, then **Plugins → Start Python bridge**. Plugin menu entries are disabled while no
+drawing is open. A small status strip appears in the corner of the LibreCAD window; the session
+serves Python clients until you press *Stop* or a client sends `{"op": "shutdown"}`. LibreCAD
+stays usable while the session runs, and everything the session does is **one undo step**, by
+design.
 
 ## Driving it from Python
 

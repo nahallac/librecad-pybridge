@@ -35,12 +35,10 @@ OBJECTS_DIR  = $$OUT_PWD/.obj
 SOURCES += \
     lc_pybridge.cpp \
     lc_bridge_dispatch.cpp \
-    lc_bridge_selftest.cpp \
     lc_bridge_server.cpp
 
 HEADERS += \
     lc_pybridge.h \
     lc_bridge_dispatch.h \
-    lc_bridge_selftest.h \
     lc_bridge_server.h
 DISTFILES += lc_pybridge.json
