@@ -4,3 +4,6 @@ build-tmp/
 *.so
 .qmake.stash
 Makefile.lc_pybridge
+*.egg-info/
+python/dist/
+__pycache__/

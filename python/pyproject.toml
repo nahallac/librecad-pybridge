@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lcbridge"
+version = "0.1.0"
+description = "Python client for the LibreCAD scripting bridge (librecad-pybridge)"
+readme = {text = "Client for the librecad-pybridge LibreCAD plugin: drive the live drawing over a local socket. See https://github.com/nahallac/librecad-pybridge", content-type = "text/markdown"}
+requires-python = ">=3.10"
+license = {text = "GPL-2.0-or-later"}
+authors = [{name = "Jonathan Callahan"}]
+keywords = ["librecad", "cad", "dxf", "automation"]
+
+[project.urls]
+Homepage = "https://github.com/nahallac/librecad-pybridge"
+
+[tool.setuptools]
+# One stdlib-only module; the test scripts and examples next to it are not
+# part of the installed package.
+py-modules = ["lcbridge"]

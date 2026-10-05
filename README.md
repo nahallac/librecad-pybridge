@@ -52,6 +52,14 @@ design.
 
 With a session running:
 
+Install the client into your project's environment (stdlib-only, Python 3.10+):
+
+```bash
+pip install -e "/path/to/librecad-pybridge/python"
+```
+
+or copy `python/lcbridge.py` next to your script — it is a single file with no dependencies.
+
 ```python
 import math
 from lcbridge import Document
@@ -150,6 +158,7 @@ plugin/
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
   lc_bridge_server.{h,cpp}   QLocalServer transport serving the dispatcher
 python/
+  pyproject.toml             pip packaging for the client (pip install -e python/)
   lcbridge.py                Python client, stdlib only: Bridge (protocol) +
                              Document/Entity (ergonomic API)
   smoke_test.py              end-to-end checks of the protocol layer

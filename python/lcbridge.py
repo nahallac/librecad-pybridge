@@ -28,6 +28,8 @@ XDG_RUNTIME_DIR.
 
 from __future__ import annotations
 
+__version__ = "0.1.0"
+
 import json
 import os
 import socket
