@@ -63,8 +63,10 @@ QString BridgeServer::defaultSocketName()
     const QByteArray fromEnvironment = qgetenv("LC_PYBRIDGE_SOCKET");
     if (!fromEnvironment.isEmpty())
         return QString::fromLocal8Bit(fromEnvironment);
-    // A bare name: QLocalServer resolves it to $XDG_RUNTIME_DIR/<name>, or
-    // /tmp/<name> without XDG_RUNTIME_DIR. The Python client mirrors this.
+    // A bare name: QLocalServer resolves it to QDir::tempPath()/<name>, i.e.
+    // $TMPDIR or /tmp -- not XDG_RUNTIME_DIR. The Python client mirrors this.
+    // The UserAccessOption set on the server keeps the socket 0600 even in a
+    // world-writable /tmp.
     return QStringLiteral("librecad-pybridge");
 }
 

@@ -21,7 +21,9 @@ Conventions (enforced by the plugin, documented here for convenience):
 
 The socket path is resolved the same way the plugin resolves it: the
 LC_PYBRIDGE_SOCKET environment variable if set, otherwise
-$XDG_RUNTIME_DIR/librecad-pybridge, otherwise /tmp/librecad-pybridge.
+$TMPDIR/librecad-pybridge (usually /tmp/librecad-pybridge) -- Qt5's
+QLocalServer places bare-name sockets in QDir::tempPath(), not in
+XDG_RUNTIME_DIR.
 """
 
 from __future__ import annotations
@@ -33,12 +35,17 @@ from typing import Any, Iterator
 
 
 def default_socket_path() -> str:
-    """The socket path the plugin listens on by default."""
+    """The socket path the plugin listens on by default.
+
+    Mirrors Qt5's QLocalServer: a bare listen() name becomes
+    QDir::tempPath()/<name>, and QDir::tempPath() is $TMPDIR (or /tmp), not
+    XDG_RUNTIME_DIR.
+    """
     explicit = os.environ.get("LC_PYBRIDGE_SOCKET")
     if explicit:
         return explicit
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    return os.path.join(runtime_dir, "librecad-pybridge")
+    temp_dir = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(temp_dir.rstrip("/"), "librecad-pybridge")
 
 
 class BridgeError(Exception):

@@ -96,8 +96,7 @@ objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handl
 labels — a working template for real drawings. The raw `Bridge` class remains available (also as
 `doc.bridge`) for anything the ergonomic layer does not wrap.
 
-The socket is `$XDG_RUNTIME_DIR/librecad-pybridge` (or `/tmp/librecad-pybridge` without
-`XDG_RUNTIME_DIR`); override with the `LC_PYBRIDGE_SOCKET` environment variable, which both the
+The socket is `$TMPDIR/librecad-pybridge` (usually `/tmp/librecad-pybridge`, mode 0600); override with the `LC_PYBRIDGE_SOCKET` environment variable, which both the
 plugin and the client honour. `python/smoke_test.py` is a working end-to-end example — it runs
 against a live LibreCAD session or against the stub server (`make test-socket` does the latter).
 One client at a time; a disconnect leaves the session running, so consecutive scripts can share
