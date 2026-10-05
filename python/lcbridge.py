@@ -321,6 +321,16 @@ class _LayerSwitch:
             self._doc.set_layer(self._previous)
 
 
+class _NullScope:
+    """No-op context manager: used when a batch is already open."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
 class _BatchScope:
     def __init__(self, doc: "Document"):
         self._doc = doc
@@ -332,6 +342,44 @@ class _BatchScope:
         # On an exception nothing queued is sent: the batch dies with the
         # scope rather than half-applying.
         self._doc._end_batch(discard=exc_type is not None)
+
+
+class DimStyle:
+    """Geometry settings for the drawn dimensions.
+
+    LibreCAD's plugin interface cannot create DIMENSION entities (every DIM*
+    case is disabled upstream), so the dim_*() methods draw dimensions out of
+    lines and text instead. They measure correctly and print correctly, but
+    they are plain geometry: not associative, and LibreCAD's dimension tools
+    will not edit them.
+
+    Sizes are in drawing units. ``terminator`` is "tick" (an oblique slash,
+    the architectural convention) or "arrow" (an open two-line arrowhead).
+    ``precision`` is the number of decimals; trailing zeros are trimmed.
+    ``scale`` multiplies the measured value before formatting, for drawings
+    not in the unit the label should show.
+    """
+
+    def __init__(self, text_height: float = 2.5, terminator: str = "tick",
+                 terminator_size: float = 1.25, extension_gap: float = 0.625,
+                 extension_overshoot: float = 1.25, text_gap: float = 0.625,
+                 precision: int = 2, scale: float = 1.0):
+        if terminator not in ("tick", "arrow"):
+            raise ValueError('terminator must be "tick" or "arrow"')
+        self.text_height = float(text_height)
+        self.terminator = terminator
+        self.terminator_size = float(terminator_size)
+        self.extension_gap = float(extension_gap)
+        self.extension_overshoot = float(extension_overshoot)
+        self.text_gap = float(text_gap)
+        self.precision = int(precision)
+        self.scale = float(scale)
+
+    def format_value(self, value: float) -> str:
+        text = f"{value * self.scale:.{self.precision}f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
 
 
 class Document:
@@ -553,3 +601,170 @@ class Document:
         """Format a number in the drawing's units (see the bridge docs)."""
         return self._call_now("real_to_string", value=float(value), units=units,
                               precision=precision)
+
+    # -- dimensions (drawn, not DIMENSION entities -- see DimStyle) -------------
+
+    def _dim_terminators(self, at: list[float], direction: list[float],
+                         style: DimStyle) -> None:
+        """One terminator on the dimension line at ``at``.
+
+        ``direction`` is the unit vector of the dimension line, pointing
+        inward (toward the other end).
+        """
+        import math as _math
+        ux, uy = direction
+        size = style.terminator_size
+        if style.terminator == "tick":
+            # Oblique slash at 45 degrees to the dimension line.
+            tx = (ux - uy) * size * 0.7071
+            ty = (uy + ux) * size * 0.7071
+            self.add_line((at[0] - tx, at[1] - ty), (at[0] + tx, at[1] + ty))
+        else:
+            # Open arrowhead pointing outward, 15 degrees half-angle.
+            angle = _math.atan2(uy, ux)
+            for wing in (angle + 0.262, angle - 0.262):
+                self.add_line((at[0], at[1]),
+                              (at[0] + size * 2 * _math.cos(wing),
+                               at[1] + size * 2 * _math.sin(wing)))
+
+    def dim_aligned(self, p1: Any, p2: Any, offset: float,
+                    text: str | None = None,
+                    style: DimStyle | None = None) -> None:
+        """Dimension the distance p1-p2, parallel to it.
+
+        ``offset`` places the dimension line to the left of the p1->p2
+        direction (negative for the right). ``text`` overrides the measured
+        label. Drawn on the current layer; wrap in ``doc.layer(...)`` to
+        direct it.
+        """
+        import math as _math
+        style = style or DimStyle()
+        x1, y1 = _pt(p1)
+        x2, y2 = _pt(p2)
+        length = _math.hypot(x2 - x1, y2 - y1)
+        if length == 0.0:
+            raise ValueError("dim_aligned needs two distinct points")
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        nx, ny = -uy, ux                       # left normal
+        side = 1.0 if offset >= 0 else -1.0
+        distance = abs(offset)
+
+        gap = style.extension_gap
+        over = style.extension_overshoot
+        with self.batch() if self._queue is None else _NullScope():
+            for x, y in ((x1, y1), (x2, y2)):
+                self.add_line((x + side * nx * gap, y + side * ny * gap),
+                              (x + side * nx * (distance + over),
+                               y + side * ny * (distance + over)))
+            d1 = (x1 + side * nx * distance, y1 + side * ny * distance)
+            d2 = (x2 + side * nx * distance, y2 + side * ny * distance)
+            self.add_line(d1, d2)
+            self._dim_terminators([d1[0], d1[1]], [ux, uy], style)
+            self._dim_terminators([d2[0], d2[1]], [-ux, -uy], style)
+
+            angle = _math.atan2(uy, ux)
+            if angle > _math.pi / 2 or angle <= -_math.pi / 2:
+                angle += _math.pi         # keep the label readable
+                tnx, tny = -nx * side, -ny * side
+            else:
+                tnx, tny = nx * side, ny * side
+            label = text if text is not None else style.format_value(length)
+            self.add_text(label,
+                          ((d1[0] + d2[0]) / 2 + tnx * style.text_gap,
+                           (d1[1] + d2[1]) / 2 + tny * style.text_gap),
+                          height=style.text_height, angle=angle,
+                          halign="center", valign="bottom")
+
+    def dim_horizontal(self, p1: Any, p2: Any, y: float,
+                       text: str | None = None,
+                       style: DimStyle | None = None) -> None:
+        """Horizontal distance between two points, dimension line at ``y``."""
+        a, b = _pt(p1), _pt(p2)
+        if a[0] > b[0]:
+            a, b = b, a
+        self._dim_projected(a, b, (a[0], y), (b[0], y), text, style)
+
+    def dim_vertical(self, p1: Any, p2: Any, x: float,
+                     text: str | None = None,
+                     style: DimStyle | None = None) -> None:
+        """Vertical distance between two points, dimension line at ``x``."""
+        a, b = _pt(p1), _pt(p2)
+        if a[1] > b[1]:
+            a, b = b, a
+        self._dim_projected(a, b, (x, a[1]), (x, b[1]), text, style)
+
+    def _dim_projected(self, s1: Any, s2: Any, d1: Any, d2: Any,
+                       text: str | None, style: DimStyle | None) -> None:
+        """Extension lines from s1->d1 and s2->d2, dimension line d1-d2."""
+        import math as _math
+        style = style or DimStyle()
+        s1, s2, d1, d2 = _pt(s1), _pt(s2), _pt(d1), _pt(d2)
+        length = _math.hypot(d2[0] - d1[0], d2[1] - d1[1])
+        if length == 0.0:
+            raise ValueError("dimension has zero length")
+        ux, uy = (d2[0] - d1[0]) / length, (d2[1] - d1[1]) / length
+
+        with self.batch() if self._queue is None else _NullScope():
+            for source, target in ((s1, d1), (s2, d2)):
+                ex, ey = target[0] - source[0], target[1] - source[1]
+                elen = _math.hypot(ex, ey)
+                if elen > style.extension_gap:
+                    ex, ey = ex / elen, ey / elen
+                    self.add_line((source[0] + ex * style.extension_gap,
+                                   source[1] + ey * style.extension_gap),
+                                  (target[0] + ex * style.extension_overshoot,
+                                   target[1] + ey * style.extension_overshoot))
+            self.add_line(tuple(d1), tuple(d2))
+            self._dim_terminators(d1, [ux, uy], style)
+            self._dim_terminators(d2, [-ux, -uy], style)
+
+            angle = _math.atan2(uy, ux)
+            nx, ny = -uy, ux
+            if angle > _math.pi / 2 or angle <= -_math.pi / 2:
+                angle += _math.pi
+                nx, ny = -nx, -ny
+            label = text if text is not None else style.format_value(length)
+            self.add_text(label,
+                          ((d1[0] + d2[0]) / 2 + nx * style.text_gap,
+                           (d1[1] + d2[1]) / 2 + ny * style.text_gap),
+                          height=style.text_height, angle=angle,
+                          halign="center", valign="bottom")
+
+    def dim_radius(self, center: Any, radius: float, angle: float = 0.785398,
+                   text: str | None = None,
+                   style: DimStyle | None = None) -> None:
+        """Radius leader from the center to the circle edge at ``angle``."""
+        import math as _math
+        style = style or DimStyle()
+        cx, cy = _pt(center)
+        ex = cx + radius * _math.cos(angle)
+        ey = cy + radius * _math.sin(angle)
+        with self.batch() if self._queue is None else _NullScope():
+            self.add_line((cx, cy), (ex, ey))
+            self._dim_terminators([ex, ey],
+                                  [-_math.cos(angle), -_math.sin(angle)], style)
+            label = text if text is not None                 else "R" + style.format_value(float(radius))
+            tangle = angle if -_math.pi / 2 < angle <= _math.pi / 2                 else angle + _math.pi
+            self.add_text(label, ((cx + ex) / 2, (cy + ey) / 2 + style.text_gap),
+                          height=style.text_height, angle=tangle,
+                          halign="center", valign="bottom")
+
+    def dim_diameter(self, center: Any, radius: float, angle: float = 0.785398,
+                     text: str | None = None,
+                     style: DimStyle | None = None) -> None:
+        """Diameter leader straight through the circle at ``angle``."""
+        import math as _math
+        style = style or DimStyle()
+        cx, cy = _pt(center)
+        ux, uy = _math.cos(angle), _math.sin(angle)
+        p1 = (cx - radius * ux, cy - radius * uy)
+        p2 = (cx + radius * ux, cy + radius * uy)
+        with self.batch() if self._queue is None else _NullScope():
+            self.add_line(p1, p2)
+            self._dim_terminators(list(p1), [ux, uy], style)
+            self._dim_terminators(list(p2), [-ux, -uy], style)
+            label = text if text is not None                 else "\u00d8" + style.format_value(2.0 * float(radius))
+            tangle = angle if -_math.pi / 2 < angle <= _math.pi / 2                 else angle + _math.pi
+            self.add_text(label, (cx, cy + style.text_gap),
+                          height=style.text_height, angle=tangle,
+                          halign="center", valign="bottom")

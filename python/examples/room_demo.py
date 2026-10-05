@@ -18,7 +18,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from lcbridge import Document
+from lcbridge import DimStyle, Document
 
 W, H = 4000.0, 3000.0          # room, inner face
 T = 100.0                      # wall thickness
@@ -65,6 +65,16 @@ def main() -> int:
         with doc.layer("LABELS"):
             doc.add_text("ROOM  4.0 x 3.0", (W / 2, H - 300), height=150,
                          halign="center")
+
+        with doc.layer("DIMS"):
+            # Sized for a drawing in millimetres.
+            mm = DimStyle(text_height=120, terminator_size=60,
+                          extension_gap=30, extension_overshoot=60,
+                          text_gap=40, precision=0)
+            doc.dim_horizontal((-T, -T), (W + T, -T), y=-T - 500, style=mm)
+            doc.dim_vertical((W + T, -T), (W + T, H + T), x=W + T + 500, style=mm)
+            doc.dim_aligned((600, 0), (600 + DOOR, 0), offset=-250, style=mm)
+            doc.dim_radius((W / 2, H / 2), 450, style=mm)
 
         doc.update_view()
         census: dict[str, int] = {}

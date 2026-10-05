@@ -32,7 +32,10 @@ The LibreCAD binary exports `Doc_plugin_interface::addMText`, `::addToUndo`, and
 concrete `Doc_plugin_interface` class declared *after* the `Document_Interface` virtuals, not
 hidden additions to the interface — see `librecad/src/main/doc_plugin_interface.h:82,100,132`.
 They are not callable from a plugin, and `addMText` in particular means **plugins can create
-TEXT but not MTEXT**.
+TEXT but not MTEXT**. Dimensions are worse off still: `newEntity()` has every `DIM*` case
+commented out and `updateData()` ignores dimension types, so **DIMENSION entities cannot be
+created or edited through the plugin interface at all**. The Python API's `dim_*()` methods draw
+dimensions from lines and text instead — correct to measure and print, but plain geometry.
 
 ---
 

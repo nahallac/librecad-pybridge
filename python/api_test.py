@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import sys
 
-from lcbridge import BridgeError, Document, StaleEntityError
+from lcbridge import BridgeError, DimStyle, Document, StaleEntityError
 
 checks = 0
 
@@ -129,6 +129,22 @@ def main() -> int:
             check(False, "removed entity must be stale")
         except StaleEntityError:
             check(True, "remove() makes the entity stale")
+
+        # -- dimensions ---------------------------------------------------------
+        with doc.layer("LC_API_DIMS"):
+            doc.dim_aligned((0, 0), (100, 0), offset=-15)
+            doc.dim_radius((50, 40), 20)
+            doc.dim_diameter((50, 40), 20, style=DimStyle(terminator="arrow"))
+            with doc.batch():                     # dims nest inside a batch
+                doc.dim_vertical((10, 5), (90, 25), x=120)
+
+        dim_entities = [e for e in doc.entities()
+                        if e["layer"] == "LC_API_DIMS"]
+        dim_texts = sorted(e["text"] for e in dim_entities if e.type == "TEXT")
+        check(dim_texts == ["100", "20", "R20", "Ø40"],
+              f"dimension labels measure correctly ({dim_texts})")
+        check(sum(1 for e in dim_entities if e.type == "LINE") == 17,
+              "dimension line work drawn (ticks, arrows, extensions)")
 
         # -- misc ---------------------------------------------------------------
         doc.set_variable("$LC_API_PROBE", 3, type="int")

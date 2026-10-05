@@ -92,9 +92,31 @@ so results always reflect what was queued, and an exception discards the unsent 
 objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handle, `update()` and
 `remove()` end it — further use raises `StaleEntityError`, re-fetch with `doc.entities()`.
 
-`python/examples/room_demo.py` draws a furnished room with walls, a door swing, a window, and
-labels — a working template for real drawings. The raw `Bridge` class remains available (also as
-`doc.bridge`) for anything the ergonomic layer does not wrap.
+### Dimensions
+
+LibreCAD's plugin interface cannot create DIMENSION entities (every `DIM*` case is disabled
+upstream), so the API draws them instead: extension lines, dimension line, tick or arrow
+terminators, and a measured label. They measure and print correctly, but they are plain geometry —
+not associative, and LibreCAD's dimension tools will not edit them.
+
+```python
+from lcbridge import Document, DimStyle
+
+mm = DimStyle(text_height=120, terminator_size=60, precision=0)  # sized for mm drawings
+with doc.layer("DIMS"):
+    doc.dim_horizontal((0, 0), (4000, 0), y=-600, style=mm)      # measured label: 4000
+    doc.dim_vertical((4000, 0), (4000, 3000), x=4600, style=mm)
+    doc.dim_aligned(p1, p2, offset=-250, style=mm)               # parallel to p1-p2
+    doc.dim_radius(center, 450, style=mm)                        # R450
+    doc.dim_diameter(center, 450, style=mm)                      # Ø900
+```
+
+`DimStyle` holds sizes (in drawing units), tick vs arrow terminators, precision, and a value
+scale; pass `text=` to override the measured label.
+
+`python/examples/room_demo.py` draws a furnished room with walls, a door swing, a window, labels,
+and dimensions — a working template for real drawings. The raw `Bridge` class remains available
+(also as `doc.bridge`) for anything the ergonomic layer does not wrap.
 
 The socket is `$TMPDIR/librecad-pybridge` (usually `/tmp/librecad-pybridge`, mode 0600); override with the `LC_PYBRIDGE_SOCKET` environment variable, which both the
 plugin and the client honour. `python/smoke_test.py` is a working end-to-end example — it runs
