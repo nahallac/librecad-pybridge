@@ -3,9 +3,8 @@
 Scripting for LibreCAD: drive the open drawing from Python, with access to geometry, layers,
 blocks, and selection.
 
-Spun out of a separate house-layout project; see `LIBRECAD-SCRIPTING-HANDOFF.md` in that project for
-the original scoping. `docs/findings.md` supersedes the handoff's risk list wherever the two
-disagree.
+Spun out of a house-layout project that needed scripted floorplans. `docs/findings.md` records
+what has been established about LibreCAD's plugin API, with evidence for each claim.
 
 **Status: milestone 4 (Python API).** A Qt5 C++ plugin that exposes `Document_Interface` as a
 table of named JSON operations and serves them over a Unix domain socket, plus a Python client in
@@ -187,8 +186,8 @@ so the claims in `docs/findings.md` can be rechecked without network access.
 
 ## What comes next
 
-Milestone 5: drive a real floorplan (a house-layout project) through the API — the honest test
-of whether it is pleasant to use. Candidates that may fall out of that: a `prompt_selection`
+Milestone 5: drive a real floorplan through the API — the honest test of whether it is pleasant
+to use. Candidates that may fall out of that: a `prompt_selection`
 operation (deliberately interactive, see findings risk 8), MTEXT support if LibreCAD grows it in
 the plugin interface, and block insert workflows.
 
