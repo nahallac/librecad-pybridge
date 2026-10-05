@@ -7,10 +7,11 @@ Spun out of a separate house-layout project; see `LIBRECAD-SCRIPTING-HANDOFF.md`
 the original scoping. `docs/findings.md` supersedes the handoff's risk list wherever the two
 disagree.
 
-**Status: milestone 3 (transport).** A Qt5 C++ plugin that exposes `Document_Interface` as a
-table of named JSON operations and serves them over a Unix domain socket, plus a thin Python
-client. A script can now draw into the live drawing. The ergonomic Python API
-(`doc.add_line(p1, p2)`, `doc.layers`, ...) is the next milestone.
+**Status: milestone 4 (Python API).** A Qt5 C++ plugin that exposes `Document_Interface` as a
+table of named JSON operations and serves them over a Unix domain socket, plus a Python client in
+two layers: a thin protocol mirror (`Bridge`) and the ergonomic API scripts are meant to use
+(`Document`, `Entity`). What remains of the original plan is the honest test — driving a real
+floorplan through it.
 
 ## Build and install
 
@@ -65,16 +66,35 @@ open.
 With a session running:
 
 ```python
-import sys; sys.path.insert(0, "python")   # or copy python/lcbridge.py next to your script
-from lcbridge import Bridge
+import math
+from lcbridge import Document
 
-with Bridge() as b:
-    b.request("set_layer", name="DEMO")
-    b.request("add_line", start=[0, 0], end=[5000, 0])
-    b.batch([{"op": "add_circle", "args": {"center": [x * 100.0, 0], "radius": 30}}
-             for x in range(20)])
-    print(b.request("get_layers"))
+with Document.connect() as doc:
+    doc.set_layer("WALLS")
+    doc.add_polyline([(0, 0), (4000, 0), (4000, 3000), (0, 3000)], closed=True)
+
+    with doc.layer("OPENINGS"):                    # switches back on exit
+        doc.add_arc((600, 0), 900, 0, math.pi / 2)
+
+    with doc.batch():                              # one wire message
+        for x in range(100):
+            doc.add_circle((x * 50, -500), 10)
+
+    for circle in doc.entities(types=["CIRCLE"]):
+        if circle["radius"] < 15:
+            circle.update(color=0xFF0000)          # handle dies; re-fetch to reuse
+    doc.release()
 ```
+
+Points are tuples, angles radians, colors ints (`-1` ByLayer, else 24-bit RGB). `doc.batch()`
+queues creation calls and sends them as a single message; a query inside the batch flushes first,
+so results always reflect what was queued, and an exception discards the unsent queue. Entity
+objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handle, `update()` and
+`remove()` end it — further use raises `StaleEntityError`, re-fetch with `doc.entities()`.
+
+`python/examples/room_demo.py` draws a furnished room with walls, a door swing, a window, and
+labels — a working template for real drawings. The raw `Bridge` class remains available (also as
+`doc.bridge`) for anything the ergonomic layer does not wrap.
 
 The socket is `$XDG_RUNTIME_DIR/librecad-pybridge` (or `/tmp/librecad-pybridge` without
 `XDG_RUNTIME_DIR`); override with the `LC_PYBRIDGE_SOCKET` environment variable, which both the
@@ -122,8 +142,11 @@ plugin/
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
   lc_bridge_server.{h,cpp}   QLocalServer transport serving the dispatcher
 python/
-  lcbridge.py                thin Python client (stdlib only)
-  smoke_test.py              end-to-end checks over the socket
+  lcbridge.py                Python client, stdlib only: Bridge (protocol) +
+                             Document/Entity (ergonomic API)
+  smoke_test.py              end-to-end checks of the protocol layer
+  api_test.py                end-to-end checks of the ergonomic layer
+  examples/room_demo.py      a furnished room drawn through the API
 tools/loadtest/      QPluginLoader harness, used by `make check`
 tools/dispatchtest/  stub Document_Interface + runner (`make test`); --serve mode
                      serves the stub over the socket for `make test-socket`
@@ -143,8 +166,10 @@ so the claims in `docs/findings.md` can be rechecked without network access.
 
 ## What comes next
 
-Milestone 4, the ergonomic Python API over the thin client; then driving a real floorplan through
-it as the honest test.
+Milestone 5: drive a real floorplan (a house-layout project) through the API — the honest test
+of whether it is pleasant to use. Candidates that may fall out of that: a `prompt_selection`
+operation (deliberately interactive, see findings risk 8), MTEXT support if LibreCAD grows it in
+the plugin interface, and block insert workflows.
 
 The architecture note, for context. `docs/findings.md` risk 7 establishes that a
 plugin cannot hold a `Document_Interface*` past the end of `execComm()`: the object is

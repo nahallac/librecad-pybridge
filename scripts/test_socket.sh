@@ -24,6 +24,7 @@ for _ in $(seq 1 50); do
 done
 [ -S "$LC_PYBRIDGE_SOCKET" ] || { echo "server never opened the socket" >&2; exit 1; }
 
-python3 "$repo_root/python/smoke_test.py" --shutdown
+python3 "$repo_root/python/smoke_test.py"
+python3 "$repo_root/python/api_test.py" --shutdown
 
 wait "$server_pid"
