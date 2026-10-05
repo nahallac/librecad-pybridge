@@ -1,0 +1,6 @@
+build/
+build-tmp/
+*.o
+*.so
+.qmake.stash
+Makefile.lc_pybridge
