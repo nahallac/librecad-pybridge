@@ -269,9 +269,14 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
     }
 
     // Non-modal status window. LibreCAD stays usable during the session; this
-    // just shows activity and offers the only way to end it from the GUI.
+    // just shows activity and offers the only way to end it from the GUI. It
+    // must not compete with the drawing for attention: it opens without
+    // taking focus and never grabs keyboard focus, so typing and shortcuts
+    // keep going to LibreCAD. The Stop button still takes mouse clicks.
     QDialog dialog(parent);
     dialog.setWindowTitle(tr("Python bridge session"));
+    dialog.setAttribute(Qt::WA_ShowWithoutActivating, true);
+    dialog.setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
 
     auto *layout = new QVBoxLayout(&dialog);
     auto *status = new QLabel(tr("Listening on %1\n\n"
