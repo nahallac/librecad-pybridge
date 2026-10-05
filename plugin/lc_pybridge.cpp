@@ -22,12 +22,16 @@
 #include <QDialog>
 #include <QFontDatabase>
 #include <QDialogButtonBox>
+#include <QEvent>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QStringList>
 #include <QVBoxLayout>
 #include <QVariant>
 
+#include <functional>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -268,51 +272,79 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
         return;
     }
 
-    // Non-modal status window. LibreCAD stays usable during the session; this
-    // just shows activity and offers the only way to end it from the GUI. It
-    // must not compete with the drawing for attention: it opens without
-    // taking focus and never grabs keyboard focus, so typing and shortcuts
-    // keep going to LibreCAD. The Stop button still takes mouse clicks.
-    QDialog dialog(parent);
-    dialog.setWindowTitle(tr("Python bridge session"));
-    dialog.setAttribute(Qt::WA_ShowWithoutActivating, true);
-    dialog.setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
+    // Status display. A separate window is wrong here twice over: it steals
+    // focus from the drawing, and on Wayland Qt cannot position a top-level
+    // window, so the compositor drops it in the middle of the screen. So the
+    // status is a small child widget overlaid inside LibreCAD's own window,
+    // pinned to the bottom-right corner above the status bar, where it blocks
+    // nothing and never takes focus.
+    QWidget overlay(parent);
+    overlay.setObjectName(QStringLiteral("lc_pybridge_overlay"));
+    overlay.setAutoFillBackground(true);
 
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *status = new QLabel(tr("Listening on %1\n\n"
-                                 "Waiting for a client. The whole session will "
-                                 "be one undo step.")
+    auto *layout = new QHBoxLayout(&overlay);
+    layout->setContentsMargins(10, 6, 10, 6);
+
+    auto *status = new QLabel(tr("Bridge listening on %1")
                                   .arg(server.fullServerName()),
-                              &dialog);
-    status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                              &overlay);
     layout->addWidget(status);
 
-    auto *stopButton = new QPushButton(tr("Stop session"), &dialog);
+    auto *stopButton = new QPushButton(tr("Stop"), &overlay);
+    stopButton->setFocusPolicy(Qt::NoFocus);
     layout->addWidget(stopButton);
 
-    connect(stopButton, &QPushButton::clicked, &server, &lcbridge::BridgeServer::stop);
-    // Closing the window must also end the nested loop, or the session would
-    // keep running with no way to reach it.
-    connect(&dialog, &QDialog::finished, &server, &lcbridge::BridgeServer::stop);
-
-    const QString socketPath = server.fullServerName();
+    connect(stopButton, &QPushButton::clicked, &server,
+            &lcbridge::BridgeServer::stop);
     connect(&server, &lcbridge::BridgeServer::clientChanged, status,
-            [status, socketPath](bool connected) {
-                status->setText(connected
-                                    ? tr("Client connected on %1").arg(socketPath)
-                                    : tr("Client disconnected; still listening "
-                                         "on %1").arg(socketPath));
+            [status](bool connected) {
+                status->setText(connected ? tr("Bridge: client connected")
+                                          : tr("Bridge: listening"));
             });
     connect(&server, &lcbridge::BridgeServer::requestHandled, status,
             [status](int total) {
-                status->setText(tr("Requests handled: %1").arg(total));
+                status->setText(tr("Bridge: %1 requests").arg(total));
             });
 
-    dialog.show();
+    // Keep the overlay pinned to the parent's bottom-right corner, tracking
+    // both its own size (the label text changes) and parent resizes.
+    const auto reposition = [parentWidget = parent, &overlay]() {
+        overlay.adjustSize();
+        const int margin = 12;
+        overlay.move(parentWidget->width() - overlay.width() - margin,
+                     parentWidget->height() - overlay.height() - margin);
+        overlay.raise();
+    };
+
+    class RepinFilter : public QObject
+    {
+    public:
+        explicit RepinFilter(std::function<void()> repin)
+            : m_repin(std::move(repin)) {}
+        bool eventFilter(QObject *watched, QEvent *event) override
+        {
+            if (event->type() == QEvent::Resize)
+                m_repin();
+            return QObject::eventFilter(watched, event);
+        }
+    private:
+        std::function<void()> m_repin;
+    } repinFilter{reposition};
+
+    parent->installEventFilter(&repinFilter);
+    connect(&server, &lcbridge::BridgeServer::requestHandled, &overlay,
+            [reposition](int) { reposition(); });
+    connect(&server, &lcbridge::BridgeServer::clientChanged, &overlay,
+            [reposition](bool) { reposition(); });
+
+    reposition();
+    overlay.show();
+    overlay.raise();
 
     const int handled = server.serve();
 
-    dialog.hide();
+    parent->removeEventFilter(&repinFilter);
+    overlay.hide();
     doc->updateView();
     QMessageBox::information(parent, tr(kPluginTitle),
                              tr("Bridge session ended after %1 requests.")
