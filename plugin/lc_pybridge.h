@@ -49,6 +49,10 @@ private:
     //! Run the dispatch layer's self-test against the open drawing and show
     //! the report. Milestone 2 stands in for the socket transport this way.
     void runDispatchSelfTest(Document_Interface *doc, QWidget *parent);
+
+    //! Open the bridge socket and serve Python clients until the user stops
+    //! the session or a client sends {"op": "shutdown"}.
+    void runBridgeSession(Document_Interface *doc, QWidget *parent);
 };
 
 #endif // LC_PYBRIDGE_H

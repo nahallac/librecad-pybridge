@@ -9,6 +9,7 @@
 
 #include "lc_bridge_dispatch.h"
 #include "lc_bridge_selftest.h"
+#include "lc_bridge_server.h"
 
 #include "document_interface.h"
 
@@ -21,6 +22,8 @@
 #include <QDialog>
 #include <QFontDatabase>
 #include <QDialogButtonBox>
+#include <QLabel>
+#include <QPushButton>
 #include <QStringList>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -36,6 +39,7 @@ const char *const kPluginTitle = "Python Bridge";
 const char *const kActionReport = "Python Bridge: Report document";
 const char *const kActionUndoProbe = "Python Bridge: Undo probe";
 const char *const kActionSelfTest = "Python Bridge: Dispatch self-test";
+const char *const kActionBridge = "Python Bridge: Start bridge session";
 
 } // namespace
 
@@ -50,7 +54,8 @@ PluginCapabilities LC_PyBridge::getCapabilities() const
     capabilities.menuEntryPoints
         << PluginMenuLocation(QStringLiteral("plugins_menu"), tr(kActionReport))
         << PluginMenuLocation(QStringLiteral("plugins_menu"), tr(kActionUndoProbe))
-        << PluginMenuLocation(QStringLiteral("plugins_menu"), tr(kActionSelfTest));
+        << PluginMenuLocation(QStringLiteral("plugins_menu"), tr(kActionSelfTest))
+        << PluginMenuLocation(QStringLiteral("plugins_menu"), tr(kActionBridge));
     return capabilities;
 }
 
@@ -69,6 +74,8 @@ void LC_PyBridge::execComm(Document_Interface *doc, QWidget *parent, QString cmd
         drawUndoProbe(doc, parent);
     else if (cmd == tr(kActionSelfTest))
         runDispatchSelfTest(doc, parent);
+    else if (cmd == tr(kActionBridge))
+        runBridgeSession(doc, parent);
     else
         reportDocument(doc, parent, cmd);
 }
@@ -244,4 +251,65 @@ void LC_PyBridge::runDispatchSelfTest(Document_Interface *doc, QWidget *parent)
     layout->addWidget(buttons);
 
     dialog.exec();
+}
+
+void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
+{
+    // Server and dispatcher live on the stack: the Document_Interface they
+    // borrow dies when execComm() returns, and serve() keeps execComm() on the
+    // stack for the whole session. Everything a session draws is one undo
+    // step, because execPlug() wraps this call in an LC_UndoSection.
+    lcbridge::BridgeServer server(doc);
+
+    if (!server.listen(lcbridge::BridgeServer::defaultSocketName())) {
+        QMessageBox::warning(parent, tr(kPluginTitle),
+                             tr("Could not open the bridge socket:\n%1")
+                                 .arg(server.errorString()));
+        return;
+    }
+
+    // Non-modal status window. LibreCAD stays usable during the session; this
+    // just shows activity and offers the only way to end it from the GUI.
+    QDialog dialog(parent);
+    dialog.setWindowTitle(tr("Python bridge session"));
+
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *status = new QLabel(tr("Listening on %1\n\n"
+                                 "Waiting for a client. The whole session will "
+                                 "be one undo step.")
+                                  .arg(server.fullServerName()),
+                              &dialog);
+    status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(status);
+
+    auto *stopButton = new QPushButton(tr("Stop session"), &dialog);
+    layout->addWidget(stopButton);
+
+    connect(stopButton, &QPushButton::clicked, &server, &lcbridge::BridgeServer::stop);
+    // Closing the window must also end the nested loop, or the session would
+    // keep running with no way to reach it.
+    connect(&dialog, &QDialog::finished, &server, &lcbridge::BridgeServer::stop);
+
+    const QString socketPath = server.fullServerName();
+    connect(&server, &lcbridge::BridgeServer::clientChanged, status,
+            [status, socketPath](bool connected) {
+                status->setText(connected
+                                    ? tr("Client connected on %1").arg(socketPath)
+                                    : tr("Client disconnected; still listening "
+                                         "on %1").arg(socketPath));
+            });
+    connect(&server, &lcbridge::BridgeServer::requestHandled, status,
+            [status](int total) {
+                status->setText(tr("Requests handled: %1").arg(total));
+            });
+
+    dialog.show();
+
+    const int handled = server.serve();
+
+    dialog.hide();
+    doc->updateView();
+    QMessageBox::information(parent, tr(kPluginTitle),
+                             tr("Bridge session ended after %1 requests.")
+                                 .arg(handled));
 }

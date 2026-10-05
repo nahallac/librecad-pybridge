@@ -3,27 +3,67 @@
 // as a build-time check.
 //
 // Usage: dispatchtest [--verbose]
+//        dispatchtest --serve [socket]
 //   --verbose  also print every Document_Interface call the stub recorded.
+//   --serve    instead of the self-test, serve the stub document over the
+//              bridge socket until a client sends {"op": "shutdown"}. Lets the
+//              Python client be tested end to end without LibreCAD.
 
 #include "fake_document.h"
 
 #include "lc_bridge_dispatch.h"
 #include "lc_bridge_selftest.h"
+#include "lc_bridge_server.h"
 
 #include <QCoreApplication>
 #include <QString>
 
 #include <cstdio>
 
+namespace {
+
+int serveStub(const QString &socketName)
+{
+    faketest::FakeDocument document;
+    lcbridge::BridgeServer server(&document);
+
+    if (!server.listen(socketName)) {
+        std::fprintf(stderr, "listen failed on \"%s\": %s\n",
+                     qUtf8Printable(socketName),
+                     qUtf8Printable(server.errorString()));
+        return 1;
+    }
+
+    std::printf("serving stub document on %s\n",
+                qUtf8Printable(server.fullServerName()));
+    std::fflush(stdout);
+
+    const int handled = server.serve();
+    std::printf("served %d requests\n", handled);
+    return 0;
+}
+
+} // namespace
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
     bool verbose = false;
+    bool serve = false;
+    QString socketName = lcbridge::BridgeServer::defaultSocketName();
     for (int i = 1; i < argc; ++i) {
-        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--verbose"))
+        const QString argument = QString::fromLocal8Bit(argv[i]);
+        if (argument == QLatin1String("--verbose"))
             verbose = true;
+        else if (argument == QLatin1String("--serve"))
+            serve = true;
+        else if (serve)
+            socketName = argument;
     }
+
+    if (serve)
+        return serveStub(socketName);
 
     faketest::FakeDocument document;
     lcbridge::Dispatcher dispatcher(&document);

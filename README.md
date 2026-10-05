@@ -7,10 +7,10 @@ Spun out of a separate house-layout project; see `LIBRECAD-SCRIPTING-HANDOFF.md`
 the original scoping. `docs/findings.md` supersedes the handoff's risk list wherever the two
 disagree.
 
-**Status: milestone 2 (dispatch layer).** A Qt5 C++ plugin that builds against the
-distro-installed LibreCAD headers, loads into LibreCAD, and exposes `Document_Interface` as a
-table of named JSON operations. The operations are driven by a fixed self-test sequence; the
-socket transport and the Python client come next. No Python yet.
+**Status: milestone 3 (transport).** A Qt5 C++ plugin that exposes `Document_Interface` as a
+table of named JSON operations and serves them over a Unix domain socket, plus a thin Python
+client. A script can now draw into the live drawing. The ergonomic Python API
+(`doc.add_line(p1, p2)`, `doc.layers`, ...) is the next milestone.
 
 ## Build and install
 
@@ -28,10 +28,11 @@ loaded once at startup.
 Individual steps, if you want them:
 
 ```bash
-make           # build build/liblc_pybridge.so
-make test      # run the dispatch layer against a stub document, no LibreCAD needed
-make check     # make test, plus load the plugin with QPluginLoader and print its metadata
-make install   # copy to ~/.librecad/plugins/
+make             # build build/liblc_pybridge.so
+make test        # dispatch layer against a stub document, no LibreCAD needed
+make test-socket # stub document served over a socket, Python client driving it
+make check       # both tests, plus load the plugin with QPluginLoader
+make install     # copy to ~/.librecad/plugins/
 make uninstall
 ```
 
@@ -55,6 +56,32 @@ open.
   and shows a pass/fail report. It draws into a layer called `LC_BRIDGE_SELFTEST` and then moves,
   rotates, scales, rewrites, and deletes some of what it drew, so run it on a scratch drawing. All
   of it is one undo step.
+- **Python Bridge: Start bridge session** — opens the bridge socket and serves Python clients until
+  you press *Stop session* or a client sends `{"op": "shutdown"}`. LibreCAD stays usable while the
+  session runs. Everything the session does is **one undo step**, by design.
+
+## Driving it from Python
+
+With a session running:
+
+```python
+import sys; sys.path.insert(0, "python")   # or copy python/lcbridge.py next to your script
+from lcbridge import Bridge
+
+with Bridge() as b:
+    b.request("set_layer", name="DEMO")
+    b.request("add_line", start=[0, 0], end=[5000, 0])
+    b.batch([{"op": "add_circle", "args": {"center": [x * 100.0, 0], "radius": 30}}
+             for x in range(20)])
+    print(b.request("get_layers"))
+```
+
+The socket is `$XDG_RUNTIME_DIR/librecad-pybridge` (or `/tmp/librecad-pybridge` without
+`XDG_RUNTIME_DIR`); override with the `LC_PYBRIDGE_SOCKET` environment variable, which both the
+plugin and the client honour. `python/smoke_test.py` is a working end-to-end example — it runs
+against a live LibreCAD session or against the stub server (`make test-socket` does the latter).
+One client at a time; a disconnect leaves the session running, so consecutive scripts can share
+one session (and therefore one undo step).
 
 ## The operation table
 
@@ -93,8 +120,13 @@ plugin/
   lc_pybridge.{h,cpp}        plugin entry point and menu actions
   lc_bridge_dispatch.{h,cpp} the operation table over Document_Interface
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
+  lc_bridge_server.{h,cpp}   QLocalServer transport serving the dispatcher
+python/
+  lcbridge.py                thin Python client (stdlib only)
+  smoke_test.py              end-to-end checks over the socket
 tools/loadtest/      QPluginLoader harness, used by `make check`
-tools/dispatchtest/  stub Document_Interface + runner, used by `make test`
+tools/dispatchtest/  stub Document_Interface + runner (`make test`); --serve mode
+                     serves the stub over the socket for `make test-socket`
 docs/findings.md     what has been established about the plugin API, with evidence
 vendor/              upstream LibreCAD v2.2.1.5 sources for reference, not built
 scripts/install.sh
@@ -111,8 +143,8 @@ so the claims in `docs/findings.md` can be rechecked without network access.
 
 ## What comes next
 
-Milestone 3, the socket transport: a `QLocalServer` on a Unix socket, newline-delimited JSON,
-served from inside `execComm()`. Then the Python client, then the ergonomic wrapper over it.
+Milestone 4, the ergonomic Python API over the thin client; then driving a real floorplan through
+it as the honest test.
 
 The architecture note, for context. `docs/findings.md` risk 7 establishes that a
 plugin cannot hold a `Document_Interface*` past the end of `execComm()`: the object is

@@ -300,9 +300,11 @@ reproduces this failure if anyone switches back. Reverting the fix turns 51 pass
 
 ## Risks still open
 
-- **Risk 2 — `execComm()` runs on the GUI thread.** Unchanged, and now load-bearing: given risk
-  7, the server loop has to run on the GUI thread and must pump events itself or LibreCAD will
-  appear hung for the whole session.
+- **Risk 2 — `execComm()` runs on the GUI thread.** Addressed by the transport design and so far
+  borne out: `BridgeServer::serve()` runs a nested `QEventLoop`, so LibreCAD keeps painting and
+  responding while a session is open, and each request is handled as a socket event on the GUI
+  thread. A single long-running *request* (a huge batch) still blocks the UI for its duration;
+  nothing pumps mid-request. Not yet measured under load.
 - **Risk 5 — ABI fragility.** Unchanged. Qt 5.15 is end-of-life; an Arch move to Qt 6 forces a
   rebuild. The `.pro` file hard-errors on a non-Qt-5 qmake so the failure is loud rather than a
   silently unloadable plugin.

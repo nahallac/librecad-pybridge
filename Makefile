@@ -8,7 +8,7 @@ BUILD_DIR   ?= build-tmp
 PLUGIN_DIR  ?= $(HOME)/.librecad/plugins
 PLUGIN       = build/liblc_pybridge.so
 
-.PHONY: all clean install uninstall loadtest dispatchtest check test
+.PHONY: all clean install uninstall loadtest dispatchtest check test test-socket
 
 all: $(PLUGIN)
 
@@ -31,9 +31,13 @@ dispatchtest:
 test: dispatchtest
 	"$(BUILD_DIR)/dispatchtest/dispatchtest"
 
+# End-to-end: stub document served over a socket, Python client driving it.
+test-socket: dispatchtest
+	scripts/test_socket.sh
+
 # Load the plugin exactly the way LibreCAD does and print its metadata.
 # QPluginLoader needs an absolute path; the quoting survives paths with spaces.
-check: all loadtest test
+check: all loadtest test test-socket
 	QT_QPA_PLATFORM=offscreen "$(BUILD_DIR)/loadtest/loadtest" "$(CURDIR)/$(PLUGIN)"
 
 install: all

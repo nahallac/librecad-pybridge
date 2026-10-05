@@ -1,0 +1,100 @@
+/*****************************************************************************/
+/*  lc_bridge_server.h - local-socket transport for the dispatch layer       */
+/*                                                                           */
+/*  Serves newline-delimited JSON requests over a QLocalServer, dispatching   */
+/*  each one through lcbridge::Dispatcher. The server runs a nested event     */
+/*  loop and returns when asked to stop, because the Document_Interface it    */
+/*  serves is only valid while execComm() is on the stack (docs/findings.md,  */
+/*  risk 7). The whole session lands in one undo step (risk 1) by design.     */
+/*                                                                           */
+/*  UI-free on purpose: the plugin wraps this in a small dialog, and          */
+/*  tools/dispatchtest serves a stub document headless with the same class.   */
+/*                                                                           */
+/*  Licensed under the GNU General Public License, version 2 or later.       */
+/*****************************************************************************/
+
+#ifndef LC_BRIDGE_SERVER_H
+#define LC_BRIDGE_SERVER_H
+
+#include <QByteArray>
+#include <QObject>
+#include <QString>
+
+class Document_Interface;
+class QEventLoop;
+class QLocalServer;
+class QLocalSocket;
+
+namespace lcbridge {
+
+class Dispatcher;
+
+/**
+ * Line protocol: one JSON object per line in each direction, UTF-8, '\n'
+ * terminated. Requests and responses are exactly what Dispatcher::dispatch()
+ * takes and returns, plus one server-level operation:
+ *
+ *   {"op": "shutdown"}  ->  {"ok": true, "result": null}, then the server
+ *                           stops and serve() returns.
+ *
+ * One client at a time; a second connection is sent an error line and closed.
+ * A client disconnect does not stop the server -- the session ends on
+ * "shutdown" or stop().
+ */
+class BridgeServer : public QObject
+{
+    Q_OBJECT
+
+public:
+    explicit BridgeServer(Document_Interface *doc, QObject *parent = nullptr);
+    ~BridgeServer() override;
+
+    //! Socket path used when none is given: $LC_PYBRIDGE_SOCKET if set,
+    //! otherwise the name "librecad-pybridge", which QLocalServer places in
+    //! $XDG_RUNTIME_DIR (user-only) or /tmp.
+    static QString defaultSocketName();
+
+    //! Listen on \a socketName. False on failure; error in errorString().
+    bool listen(const QString &socketName);
+
+    //! Serve until stop() or a "shutdown" request. Spins a nested event loop,
+    //! so the GUI stays responsive while a session is open. Returns the number
+    //! of requests handled.
+    int serve();
+
+    QString errorString() const { return m_error; }
+    QString fullServerName() const;
+    int requestsHandled() const { return m_requestsHandled; }
+
+public slots:
+    //! End serve() from outside, e.g. a Stop button.
+    void stop();
+
+signals:
+    //! Emitted after each handled request, for a status display.
+    void requestHandled(int total);
+    void clientChanged(bool connected);
+
+private slots:
+    void onNewConnection();
+    void onReadyRead();
+    void onDisconnected();
+
+private:
+    void processLine(const QByteArray &line);
+    void sendToClient(const QByteArray &line);
+
+    Document_Interface *m_doc {nullptr};
+    Dispatcher *m_dispatcher {nullptr};
+    QLocalServer *m_server {nullptr};
+    QLocalSocket *m_client {nullptr};
+    QByteArray m_buffer;
+    QString m_error;
+    int m_requestsHandled {0};
+    bool m_stopping {false};
+    QEventLoop *m_stopLoop {nullptr};
+};
+
+} // namespace lcbridge
+
+#endif // LC_BRIDGE_SERVER_H
