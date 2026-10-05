@@ -208,6 +208,63 @@ Note also that `killAllActions()` call: a prompt cancels whatever the user was i
 
 ---
 
+## Risk 9 — new: `Plug_Entity::getEntityType()` reports the wrong enumeration
+
+Found by running the dispatch self-test against a real drawing: every entity came back mislabelled
+— a POINT as IMAGE, a LINE as OVERLAYBOX, a CIRCLE as INSERT — while the entity *count* was right.
+
+Two things are going on, and the first explains the second.
+
+**`Plugin_Entity` does not derive from `Plug_Entity`.** They are unrelated classes with
+hand-matched vtable layouts, bridged by `reinterpret_cast`:
+
+```cpp
+Plugin_Entity *pe = new Plugin_Entity(e, this);
+sel->append(reinterpret_cast<Plug_Entity*>(pe));
+```
+
+Nothing enforces that the two declarations stay in step, and they have not. The plugin-facing
+header declares
+
+```cpp
+virtual int getEntityType();                     // document_interface.h
+```
+
+while the implementation declares
+
+```cpp
+virtual RS2::EntityType getEntityType();         // doc_plugin_interface.h:58
+```
+
+`RS2::EntityType` is a different enumeration in a different order from `DPI::ETYPE`, so the value
+that arrives through the plugin interface is an RS2 value being read as a DPI one. The overlap is
+what makes it dangerous: the result is not obviously garbage, it is a plausible wrong type.
+
+| Entity | `RS2::EntityType` | read as `DPI::ETYPE` |
+|---|---|---|
+| POINT | `EntityPoint` = 6 | `IMAGE` = 6 |
+| LINE | `EntityLine` = 7 | `OVERLAYBOX` = 7 |
+| POLYLINE | `EntityPolyline` = 8 | `SOLID` = 8 |
+| ARC | `EntityArc` = 10 | `TEXT` = 10 |
+| CIRCLE | `EntityCircle` = 11 | `INSERT` = 11 |
+| ELLIPSE | `EntityEllipse` = 12 | `POLYLINE` = 12 |
+| TEXT | `EntityText` = 17 | nothing — `UNKNOWN` |
+
+**Use the attribute hash instead.** `Plugin_Entity::getData()` inserts the correct `DPI::ETYPE`
+explicitly in every branch of its switch, so that value is reliable. `lcbridge::entityType()`
+reads it, and nothing in this project calls `getEntityType()`.
+
+The mismatched return type also means the declaration a plugin compiles against and the function it
+actually calls disagree, which is formally undefined behaviour. It happens to work because both
+types are 32-bit and returned in the same register. A LibreCAD change here would break silently
+rather than fail to link, which is a good reason to keep reading the type from the hash.
+
+`tools/dispatchtest`'s stub returns RS2 values from `getEntityType()` on purpose, so the self-test
+reproduces this failure if anyone switches back. Reverting the fix turns 51 passes into the same
+32-passed/1-failed result seen against the real drawing.
+
+---
+
 ## API details confirmed while building the dispatch layer
 
 - **`DPI::ETYPE` cannot be named directly.** Namespace `DPI` declares both an enum type `ETYPE` and
@@ -234,7 +291,7 @@ Note also that `killAllActions()` call: a prompt cancels whatever the user was i
   the class's key function, its absence means no vtable or typeinfo for `Plug_Entity` is emitted
   either. That is fine inside the plugin, which gets all three from the LibreCAD binary, but a
   standalone test binary that derives from `Plug_Entity` has to define it. `tools/dispatchtest`
-  does.
+  does. Do not call it for the entity's type — see risk 9.
 - **`Plugin_Entity::updateData()` has a harmless upstream bug**: the `STARTANGLE` branch for arcs
   calls `hash.take(DPI::STARTANGLE)` twice, so the second call yields a default `QVariant`. The
   result is assigned to a local that is never used again, so nothing is affected.

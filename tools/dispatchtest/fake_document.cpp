@@ -20,6 +20,36 @@ int Plug_Entity::getEntityType()
 }
 
 namespace faketest {
+namespace {
+
+// LibreCAD's Plugin_Entity::getEntityType() returns an RS2::EntityType, not a
+// DPI::ETYPE, so a caller that trusts it mislabels every entity. The stub
+// reproduces that on purpose: these are the RS2::EntityType values from
+// librecad/src/lib/engine/rs.h, which is what the real call reports.
+int rs2TypeFor(int dpiType)
+{
+    switch (dpiType) {
+    case DPI::POINT:            return 6;  // EntityPoint
+    case DPI::LINE:             return 7;  // EntityLine
+    case DPI::POLYLINE:         return 8;  // EntityPolyline
+    case DPI::ARC:              return 10; // EntityArc
+    case DPI::CIRCLE:           return 11; // EntityCircle
+    case DPI::ELLIPSE:          return 12; // EntityEllipse
+    case DPI::SOLID:            return 14; // EntitySolid
+    case DPI::CONSTRUCTIONLINE: return 15; // EntityConstructionLine
+    case DPI::MTEXT:            return 16; // EntityMText
+    case DPI::TEXT:             return 17; // EntityText
+    case DPI::INSERT:           return 4;  // EntityInsert
+    case DPI::HATCH:            return 25; // EntityHatch
+    case DPI::IMAGE:            return 26; // EntityImage
+    case DPI::SPLINE:           return 27; // EntitySpline
+    case DPI::SPLINEPOINTS:     return 28; // EntitySplinePoints
+    case DPI::OVERLAYBOX:       return 30; // EntityOverlayBox
+    default:                    return 0;  // EntityUnknown
+    }
+}
+
+} // namespace
 
 // --------------------------------------------------------------------------
 // FakeEntity
@@ -32,7 +62,10 @@ FakeEntity::FakeEntity(Record *record, FakeDocument *document)
 
 int FakeEntity::getEntityType()
 {
-    return m_record ? m_record->type : DPI::UNKNOWN;
+    // Deliberately the RS2 value, matching LibreCAD. Anything in the dispatch
+    // layer that reads the type from here instead of from the attribute hash
+    // will mislabel entities, and the self-test will catch it.
+    return m_record ? rs2TypeFor(m_record->type) : 0;
 }
 
 void FakeEntity::getData(QHash<int, QVariant> *data)

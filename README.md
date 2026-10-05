@@ -74,6 +74,9 @@ Conventions, uniform across every operation:
 - Colors are integers: `-1` ByLayer, `-2` ByBlock, otherwise 24-bit RGB.
 - Entity attributes are named per entity type (`start_x` on a LINE, `center_x` on a CIRCLE) rather
   than exposed as raw `EDATA` integers. Unknown or read-only names are rejected, not ignored.
+- Entity types come from the attribute hash, never from `Plug_Entity::getEntityType()`, which
+  reports a value from a different enumeration and mislabels everything — see `docs/findings.md`
+  risk 9.
 - `batch` takes a list of requests and returns a list of responses, so bulk geometry is one message
   instead of a round trip per entity.
 

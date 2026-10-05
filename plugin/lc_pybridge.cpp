@@ -37,35 +37,6 @@ const char *const kActionReport = "Python Bridge: Report document";
 const char *const kActionUndoProbe = "Python Bridge: Undo probe";
 const char *const kActionSelfTest = "Python Bridge: Dispatch self-test";
 
-QString etypeName(int type)
-{
-    switch (type) {
-    case DPI::POINT:            return QStringLiteral("POINT");
-    case DPI::LINE:             return QStringLiteral("LINE");
-    case DPI::CONSTRUCTIONLINE: return QStringLiteral("CONSTRUCTIONLINE");
-    case DPI::CIRCLE:           return QStringLiteral("CIRCLE");
-    case DPI::ARC:              return QStringLiteral("ARC");
-    case DPI::ELLIPSE:          return QStringLiteral("ELLIPSE");
-    case DPI::IMAGE:            return QStringLiteral("IMAGE");
-    case DPI::OVERLAYBOX:       return QStringLiteral("OVERLAYBOX");
-    case DPI::SOLID:            return QStringLiteral("SOLID");
-    case DPI::MTEXT:            return QStringLiteral("MTEXT");
-    case DPI::TEXT:             return QStringLiteral("TEXT");
-    case DPI::INSERT:           return QStringLiteral("INSERT");
-    case DPI::POLYLINE:         return QStringLiteral("POLYLINE");
-    case DPI::SPLINE:           return QStringLiteral("SPLINE");
-    case DPI::SPLINEPOINTS:     return QStringLiteral("SPLINEPOINTS");
-    case DPI::HATCH:            return QStringLiteral("HATCH");
-    case DPI::DIMLEADER:        return QStringLiteral("DIMLEADER");
-    case DPI::DIMALIGNED:       return QStringLiteral("DIMALIGNED");
-    case DPI::DIMLINEAR:        return QStringLiteral("DIMLINEAR");
-    case DPI::DIMRADIAL:        return QStringLiteral("DIMRADIAL");
-    case DPI::DIMDIAMETRIC:     return QStringLiteral("DIMDIAMETRIC");
-    case DPI::DIMANGULAR:       return QStringLiteral("DIMANGULAR");
-    default:                    return QStringLiteral("UNKNOWN(%1)").arg(type);
-    }
-}
-
 } // namespace
 
 QString LC_PyBridge::name() const
@@ -135,13 +106,16 @@ void LC_PyBridge::reportDocument(Document_Interface *doc, QWidget *parent,
         for (Plug_Entity *entity : all) {
             if (!entity)
                 continue;
-            byType[entity->getEntityType()] += 1;
+            // lcbridge::entityType(), not Plug_Entity::getEntityType(): the
+            // latter reports an RS2::EntityType and so mislabels everything.
+            byType[lcbridge::entityType(entity)] += 1;
         }
 
         lines << QString();
         lines << tr("Entities: %1").arg(all.size());
         for (auto it = byType.constBegin(); it != byType.constEnd(); ++it)
-            lines << tr("  %1: %2").arg(etypeName(it.key())).arg(it.value());
+            lines << tr("  %1: %2")
+                         .arg(lcbridge::entityTypeName(it.key())).arg(it.value());
     } else {
         lines << tr("getAllEntities() failed");
     }

@@ -102,6 +102,19 @@ QString typeToName(int type)
     return QStringLiteral("UNKNOWN");
 }
 
+//! Reads the DPI::ETYPE out of an entity's attribute hash. See entityType().
+int readEntityType(Plug_Entity *entity)
+{
+    if (!entity)
+        return DPI::UNKNOWN;
+
+    QHash<int, QVariant> data;
+    entity->getData(&data);
+
+    const auto it = data.constFind(DPI::ETYPE);
+    return it == data.constEnd() ? DPI::UNKNOWN : it->toInt();
+}
+
 //! Returns false if \a name is not a known entity type.
 bool nameToType(const QString &name, int *type)
 {
@@ -472,6 +485,16 @@ QJsonArray toJsonArray(const QStringList &values)
 }
 
 } // namespace
+
+int entityType(Plug_Entity *entity)
+{
+    return readEntityType(entity);
+}
+
+QString entityTypeName(int type)
+{
+    return typeToName(type);
+}
 
 // --------------------------------------------------------------------------
 // Dispatcher
@@ -924,7 +947,15 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
         if (!entity)
             continue;
 
-        const int type = entity->getEntityType();
+        // One getData() call supplies both the type and the reported
+        // attributes; the type has to come from the hash rather than from
+        // getEntityType(). See entityType() in the header.
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        const auto typeField = data.constFind(DPI::ETYPE);
+        const int type = typeField == data.constEnd() ? DPI::UNKNOWN
+                                                      : typeField->toInt();
+
         if (!wanted.isEmpty() && !wanted.contains(type)) {
             delete entity;
             continue;
@@ -933,11 +964,8 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
         QJsonObject item;
         item.insert(QStringLiteral("handle"), registerEntity(entity));
         item.insert(QStringLiteral("type"), typeToName(type));
-        if (includeData) {
-            QHash<int, QVariant> data;
-            entity->getData(&data);
+        if (includeData)
             item.insert(QStringLiteral("data"), entityDataToJson(type, data));
-        }
         result.append(item);
     }
     return result;
@@ -984,7 +1012,9 @@ QJsonValue Dispatcher::opEntityData(const QJsonObject &args)
     QHash<int, QVariant> data;
     entity->getData(&data);
 
-    const int type = entity->getEntityType();
+    const auto typeField = data.constFind(DPI::ETYPE);
+    const int type = typeField == data.constEnd() ? DPI::UNKNOWN : typeField->toInt();
+
     QJsonObject result;
     result.insert(QStringLiteral("type"), typeToName(type));
     result.insert(QStringLiteral("data"), entityDataToJson(type, data));
@@ -998,7 +1028,7 @@ QJsonValue Dispatcher::opEntityUpdate(const QJsonObject &args)
     if (fields.isEmpty())
         badArgs(QStringLiteral("\"data\" must name at least one attribute"));
 
-    QHash<int, QVariant> data = jsonToEntityData(entity->getEntityType(), fields);
+    QHash<int, QVariant> data = jsonToEntityData(readEntityType(entity), fields);
     entity->updateData(&data);
 
     // Plugin_Entity::updateData() clones the entity, registers the clone, and
@@ -1013,9 +1043,9 @@ QJsonValue Dispatcher::opEntityUpdate(const QJsonObject &args)
 QJsonValue Dispatcher::opEntityPolyline(const QJsonObject &args)
 {
     Plug_Entity *entity = lookupEntity(args);
-    if (entity->getEntityType() != DPI::POLYLINE) {
-        badArgs(QStringLiteral("entity is a %1, not a POLYLINE")
-                    .arg(typeToName(entity->getEntityType())));
+    const int type = readEntityType(entity);
+    if (type != DPI::POLYLINE) {
+        badArgs(QStringLiteral("entity is a %1, not a POLYLINE").arg(typeToName(type)));
     }
 
     QList<Plug_VertexData> vertices;
@@ -1035,9 +1065,9 @@ QJsonValue Dispatcher::opEntityPolyline(const QJsonObject &args)
 QJsonValue Dispatcher::opEntitySetPolyline(const QJsonObject &args)
 {
     Plug_Entity *entity = lookupEntity(args);
-    if (entity->getEntityType() != DPI::POLYLINE) {
-        badArgs(QStringLiteral("entity is a %1, not a POLYLINE")
-                    .arg(typeToName(entity->getEntityType())));
+    const int type = readEntityType(entity);
+    if (type != DPI::POLYLINE) {
+        badArgs(QStringLiteral("entity is a %1, not a POLYLINE").arg(typeToName(type)));
     }
 
     const std::vector<Plug_VertexData> vertices =

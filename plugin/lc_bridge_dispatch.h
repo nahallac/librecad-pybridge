@@ -23,6 +23,25 @@ class Plug_Entity;
 namespace lcbridge {
 
 /**
+ * The DPI::ETYPE of \a entity.
+ *
+ * Not Plug_Entity::getEntityType(), which cannot be used: LibreCAD's
+ * Plugin_Entity does not derive from Plug_Entity -- it is a separate class
+ * with a hand-matched vtable, reached by reinterpret_cast -- and its
+ * getEntityType() is declared to return RS2::EntityType, a different
+ * enumeration with a different order. Calling it through the plugin interface
+ * yields an RS2 value that happens to be a valid-looking DPI::ETYPE: a POINT
+ * reads back as IMAGE, a LINE as OVERLAYBOX, a CIRCLE as INSERT.
+ *
+ * The type reported in the attribute hash under the DPI::ETYPE key is the
+ * reliable one, so this reads that instead.
+ */
+int entityType(Plug_Entity *entity);
+
+//! Name of a DPI::ETYPE value, e.g. "LINE". "UNKNOWN" for anything unrecognised.
+QString entityTypeName(int type);
+
+/**
  * Executes named operations against a LibreCAD document.
  *
  * Request:  {"op": "add_line", "args": {...}, "id": 7}
