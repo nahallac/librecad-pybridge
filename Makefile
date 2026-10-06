@@ -12,7 +12,9 @@ PLUGIN       = build/liblc_pybridge.so
 
 all: $(PLUGIN)
 
-$(PLUGIN): plugin/lc_pybridge.cpp plugin/lc_pybridge.h plugin/lc_pybridge.pro
+PLUGIN_SOURCES := $(wildcard plugin/*.cpp) $(wildcard plugin/*.h) plugin/lc_pybridge.pro
+
+$(PLUGIN): $(PLUGIN_SOURCES)
 	@mkdir -p "$(BUILD_DIR)"
 	cd "$(BUILD_DIR)" && $(QMAKE) ../plugin/lc_pybridge.pro
 	$(MAKE) -C "$(BUILD_DIR)"
