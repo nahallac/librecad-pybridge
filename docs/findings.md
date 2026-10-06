@@ -68,8 +68,14 @@ On top of those, `lc_bridge_native.cpp` implements:
   fill `cbPattern`/`leScale`/`leAngle`/`cbSolid` by object name, accept it, then run `hatch`.
   The timer fires inside the dialog's own `exec()` loop. Verified by counting HATCH entities.
 
-Fragility is the price: widget object names, command spellings, mangled symbol names, and the
-`Plugin_Entity` layout are all LibreCAD internals with no compatibility promise. Everything
+**Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
+DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session
+(`python/examples/native_demo.py`). One detail found only at runtime: the command widget's
+objectName is `"Command"` (set by `lc_widgetfactory.cpp`), not the `.ui` default, so it is
+located by class name.
+
+Fragility is the price: widget class and object names, command spellings, mangled symbol names,
+and the `Plugin_Entity` layout are all LibreCAD internals with no compatibility promise. Everything
 fails soft — a missing widget or symbol turns the operations into `"unavailable"` errors (which
 is also how they behave against the offline stub, whose tests assert exactly that). Undo still
 collapses to one step per session: the injected actions' undo cycles nest inside `execPlug()`'s
