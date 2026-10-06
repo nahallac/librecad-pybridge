@@ -74,12 +74,19 @@ bool isContainerType(int dpiType)
 NativeBridge::NativeBridge(QWidget *mainWindow, QObject *parent)
     : QObject(parent)
 {
-    // The command widget is a QG_CommandWidget; its .ui file names the root
-    // widget after the class, and handleCommand(QString) is a public slot, so
-    // it is reachable with nothing but QObject machinery.
+    // The command widget's handleCommand(QString) is a public slot, so it is
+    // reachable with nothing but QObject machinery. It is found by class name:
+    // its objectName is "Command" (lc_widgetfactory.cpp passes that to the
+    // constructor, which pre-empts the .ui file's default), and a class-name
+    // scan survives both spellings.
     if (mainWindow) {
-        m_commandWidget =
-            mainWindow->findChild<QWidget *>(QStringLiteral("QG_CommandWidget"));
+        const QList<QWidget *> children = mainWindow->findChildren<QWidget *>();
+        for (QWidget *child : children) {
+            if (qstrcmp(child->metaObject()->className(), "QG_CommandWidget") == 0) {
+                m_commandWidget = child;
+                break;
+            }
+        }
     }
     if (!m_commandWidget)
         m_reason = QStringLiteral("command widget not found in the main window");
