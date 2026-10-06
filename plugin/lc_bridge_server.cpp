@@ -40,10 +40,11 @@ QJsonObject errorResponse(const QString &code, const QString &message,
 
 } // namespace
 
-BridgeServer::BridgeServer(Document_Interface *doc, QObject *parent)
+BridgeServer::BridgeServer(Document_Interface *doc, NativeBridge *native,
+                           QObject *parent)
     : QObject(parent)
     , m_doc(doc)
-    , m_dispatcher(new Dispatcher(doc))
+    , m_dispatcher(new Dispatcher(doc, native))
     , m_server(new QLocalServer(this))
 {
     // The socket lives in a user-owned directory, but enforce user-only access

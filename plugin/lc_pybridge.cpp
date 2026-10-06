@@ -6,6 +6,7 @@
 
 #include "lc_pybridge.h"
 
+#include "lc_bridge_native.h"
 #include "lc_bridge_server.h"
 
 #include "document_interface.h"
@@ -57,7 +58,8 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
     // borrow dies when execComm() returns, and serve() keeps execComm() on the
     // stack for the whole session. Everything a session draws is one undo
     // step, because execPlug() wraps this call in an LC_UndoSection.
-    lcbridge::BridgeServer server(doc);
+    lcbridge::NativeBridge native(parent);
+    lcbridge::BridgeServer server(doc, &native);
 
     if (!server.listen(lcbridge::BridgeServer::defaultSocketName())) {
         QMessageBox::warning(parent, tr(kPluginTitle),

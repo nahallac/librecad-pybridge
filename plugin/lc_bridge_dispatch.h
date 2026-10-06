@@ -22,6 +22,8 @@ class Plug_Entity;
 
 namespace lcbridge {
 
+class NativeBridge;
+
 /**
  * The DPI::ETYPE of \a entity.
  *
@@ -67,7 +69,10 @@ QString entityTypeName(int type);
 class Dispatcher
 {
 public:
-    explicit Dispatcher(Document_Interface *doc);
+    //! \a native provides the in-process operations (command injection,
+    //! selection, real dimensions, hatches); nullptr turns those operations
+    //! into "unavailable" errors, which is how the offline test stub runs.
+    explicit Dispatcher(Document_Interface *doc, NativeBridge *native = nullptr);
     ~Dispatcher();
 
     Dispatcher(const Dispatcher &) = delete;
@@ -138,7 +143,21 @@ private:
 
     QJsonValue opRealToString(const QJsonObject &args);
 
+    QJsonValue opNativeStatus(const QJsonObject &args);
+    QJsonValue opExecCommand(const QJsonObject &args);
+    QJsonValue opSelectEntities(const QJsonObject &args);
+    QJsonValue opCmdDim(const QJsonObject &args);
+    QJsonValue opCmdHatch(const QJsonObject &args);
+
+    //! Entities of \a dpiType currently in the drawing.
+    int countEntitiesOfType(int dpiType);
+    //! Set every entity's selection flag; count of entities touched.
+    int selectAll(bool selected);
+    [[noreturn]] void nativeUnavailable() const;
+    void requireNative() const;
+
     Document_Interface *m_doc {nullptr};
+    NativeBridge *m_native {nullptr};
     QHash<int, Plug_Entity *> m_entities;
     int m_nextHandle {1};
     int m_batchDepth {0};

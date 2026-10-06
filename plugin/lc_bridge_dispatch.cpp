@@ -6,6 +6,8 @@
 
 #include "lc_bridge_dispatch.h"
 
+#include "lc_bridge_native.h"
+
 #include "document_interface.h"
 
 #include <QJsonArray>
@@ -500,8 +502,9 @@ QString entityTypeName(int type)
 // Dispatcher
 // --------------------------------------------------------------------------
 
-Dispatcher::Dispatcher(Document_Interface *doc)
+Dispatcher::Dispatcher(Document_Interface *doc, NativeBridge *native)
     : m_doc(doc)
+    , m_native(native)
 {}
 
 Dispatcher::~Dispatcher()
@@ -559,6 +562,12 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("set_variable"),         &Dispatcher::opSetVariable},
 
         {QStringLiteral("real_to_string"),       &Dispatcher::opRealToString},
+
+        {QStringLiteral("native_status"),        &Dispatcher::opNativeStatus},
+        {QStringLiteral("exec_command"),         &Dispatcher::opExecCommand},
+        {QStringLiteral("select_entities"),      &Dispatcher::opSelectEntities},
+        {QStringLiteral("cmd_dim"),              &Dispatcher::opCmdDim},
+        {QStringLiteral("cmd_hatch"),            &Dispatcher::opCmdHatch},
     };
     return table;
 }
@@ -1185,6 +1194,206 @@ QJsonValue Dispatcher::opRealToString(const QJsonObject &args)
                                 optionalNumber(args, QStringLiteral("units"), 0)),
                             static_cast<int>(
                                 optionalNumber(args, QStringLiteral("precision"), 0)));
+}
+
+// --------------------------------------------------------------------------
+// Native operations: LibreCAD's command line and selection, from in-process.
+// Real dimensions and hatches are made of these -- the plugin API cannot
+// create either entity kind, so these operations drive the same actions the
+// user would, through the command widget. See lc_bridge_native.h.
+// --------------------------------------------------------------------------
+
+void Dispatcher::nativeUnavailable() const
+{
+    throw RequestError(QStringLiteral("unavailable"),
+                       m_native ? QStringLiteral("native access unavailable: %1")
+                                      .arg(m_native->reason())
+                                : QStringLiteral("no native bridge in this "
+                                                 "server (offline stub?)"));
+}
+
+void Dispatcher::requireNative() const
+{
+    if (!m_native || !m_native->commandsAvailable()
+        || !m_native->selectionAvailable()) {
+        nativeUnavailable();
+    }
+}
+
+int Dispatcher::countEntitiesOfType(int dpiType)
+{
+    QList<Plug_Entity *> entities;
+    if (!m_doc->getAllEntities(&entities, false))
+        return -1;
+
+    int count = 0;
+    for (Plug_Entity *entity : entities) {
+        if (readEntityType(entity) == dpiType)
+            ++count;
+    }
+    qDeleteAll(entities);
+    return count;
+}
+
+int Dispatcher::selectAll(bool selected)
+{
+    QList<Plug_Entity *> entities;
+    if (!m_doc->getAllEntities(&entities, false))
+        return 0;
+
+    int touched = 0;
+    for (Plug_Entity *entity : entities) {
+        if (m_native->setSelected(entity, readEntityType(entity), selected))
+            ++touched;
+    }
+    qDeleteAll(entities);
+    return touched;
+}
+
+QJsonValue Dispatcher::opNativeStatus(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    QJsonObject result;
+    result.insert(QStringLiteral("commands"),
+                  m_native && m_native->commandsAvailable());
+    result.insert(QStringLiteral("selection"),
+                  m_native && m_native->selectionAvailable());
+    result.insert(QStringLiteral("reason"),
+                  m_native ? m_native->reason() : QStringLiteral("no native bridge"));
+    return result;
+}
+
+QJsonValue Dispatcher::opExecCommand(const QJsonObject &args)
+{
+    if (!m_native || !m_native->commandsAvailable())
+        nativeUnavailable();
+    if (!m_native->execCommand(requireString(args, QStringLiteral("command")))) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("the command widget rejected the call"));
+    }
+    return QJsonValue();
+}
+
+QJsonValue Dispatcher::opSelectEntities(const QJsonObject &args)
+{
+    requireNative();
+
+    if (optionalBool(args, QStringLiteral("deselect_others"), true))
+        selectAll(false);
+
+    int selected = 0;
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 0);
+    for (int i = 0; i < handles.size(); ++i) {
+        if (!handles.at(i).isDouble())
+            badArgs(QStringLiteral("\"handles\"[%1] must be a number").arg(i));
+        QJsonObject lookup;
+        lookup.insert(QStringLiteral("handle"), handles.at(i));
+        Plug_Entity *entity = lookupEntity(lookup);
+        if (m_native->setSelected(entity, readEntityType(entity), true))
+            ++selected;
+    }
+    return selected;
+}
+
+QJsonValue Dispatcher::opCmdDim(const QJsonObject &args)
+{
+    requireNative();
+
+    const QString kind = requireString(args, QStringLiteral("kind")).toLower();
+    QString command;
+    int resultType = DPI::DIMALIGNED;
+    if (kind == QLatin1String("aligned")) {
+        command = QStringLiteral("dimaligned");
+        resultType = DPI::DIMALIGNED;
+    } else if (kind == QLatin1String("linear")) {
+        command = QStringLiteral("dimlinear");
+        resultType = DPI::DIMLINEAR;
+    } else if (kind == QLatin1String("horizontal")) {
+        command = QStringLiteral("dimhorizontal");
+        resultType = DPI::DIMLINEAR;
+    } else if (kind == QLatin1String("vertical")) {
+        command = QStringLiteral("dimvertical");
+        resultType = DPI::DIMLINEAR;
+    } else {
+        badArgs(QStringLiteral("\"kind\" must be aligned, linear, horizontal, "
+                               "or vertical"));
+    }
+
+    const QPointF p1 = requirePoint(args, QStringLiteral("p1"));
+    const QPointF p2 = requirePoint(args, QStringLiteral("p2"));
+    const QPointF dimLine = requirePoint(args, QStringLiteral("dimline"));
+
+    const auto coordinate = [](const QPointF &point) {
+        return QStringLiteral("%1,%2")
+            .arg(QString::number(point.x(), 'f', 10),
+                 QString::number(point.y(), 'f', 10));
+    };
+
+    const int before = countEntitiesOfType(resultType);
+
+    // The dimension actions take exactly the three points the GUI asks for:
+    // two extension line origins, then the dimension line location. The
+    // leading escapes clear any pending action; the trailing one ends the
+    // action's loop (it restarts at the first point after each dimension).
+    m_native->execCommand(QStringLiteral("escape"));
+    m_native->execCommand(QStringLiteral("escape"));
+    m_native->execCommand(command);
+    m_native->execCommand(coordinate(p1));
+    m_native->execCommand(coordinate(p2));
+    m_native->execCommand(coordinate(dimLine));
+    m_native->execCommand(QStringLiteral("escape"));
+
+    const int after = countEntitiesOfType(resultType);
+    if (before < 0 || after != before + 1) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("the %1 action did not create a "
+                                          "dimension (entity count %2 -> %3)")
+                               .arg(command).arg(before).arg(after));
+    }
+    m_doc->updateView();
+    return QJsonValue();
+}
+
+QJsonValue Dispatcher::opCmdHatch(const QJsonObject &args)
+{
+    requireNative();
+
+    const double angleDegrees =
+        qRadiansToDegrees(optionalNumber(args, QStringLiteral("angle"), 0.0));
+    const QString pattern = optionalString(args, QStringLiteral("pattern"),
+                                           QStringLiteral("ANSI31"));
+    const double scale = optionalNumber(args, QStringLiteral("scale"), 1.0);
+    const bool solid = optionalBool(args, QStringLiteral("solid"), false);
+
+    const int before = countEntitiesOfType(DPI::HATCH);
+
+    // The hatch action consumes the current selection as the boundary and
+    // opens a modal dialog for the pattern; armHatchDialog() fills and
+    // accepts that dialog from a timer inside its event loop.
+    opSelectEntities(args);
+    m_native->execCommand(QStringLiteral("escape"));
+    m_native->execCommand(QStringLiteral("escape"));
+    m_native->armHatchDialog(pattern, scale, angleDegrees, solid);
+    m_native->execCommand(QStringLiteral("hatch"));
+    m_native->disarmHatchDialog();
+
+    selectAll(false);
+
+    const int after = countEntitiesOfType(DPI::HATCH);
+    if (!m_native->hatchDialogHandled()) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("the hatch dialog never appeared; "
+                                          "is the boundary selectable?"));
+    }
+    if (before < 0 || after != before + 1) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("the hatch action accepted the dialog "
+                                          "but created no hatch (count %1 -> %2); "
+                                          "the boundary is probably not closed")
+                               .arg(before).arg(after));
+    }
+    m_doc->updateView();
+    return QJsonValue();
 }
 
 } // namespace lcbridge

@@ -35,7 +35,48 @@ They are not callable from a plugin, and `addMText` in particular means **plugin
 TEXT but not MTEXT**. Dimensions are worse off still: `newEntity()` has every `DIM*` case
 commented out and `updateData()` ignores dimension types, so **DIMENSION entities cannot be
 created or edited through the plugin interface at all**. The Python API's `dim_*()` methods draw
-dimensions from lines and text instead — correct to measure and print, but plain geometry.
+dimensions from lines and text instead — correct to measure and print, but plain geometry. For
+real DIMENSION and HATCH entities the bridge goes around the plugin API entirely; see "Native
+access" below.
+
+## Native access: around the plugin API from in-process
+
+Two facts make more than the plugin API reachable:
+
+1. **The command widget is drivable.** `QG_CommandWidget::handleCommand(QString)` is a public
+   slot on a widget named `QG_CommandWidget`, findable from the main window Qt gives every
+   `execComm()` call. Feeding it a line is exactly a typed command: it starts real LibreCAD
+   actions, and coordinate lines (`"10,20"`) answer their point prompts synchronously
+   (`RS_EventHandler::commandEvent` parses them with `RS_Math::eval`, so C-locale decimals work).
+   Commands exist for everything, `dimaligned` through `hatch` (`librecad/src/cmd/rs_commands.cpp`).
+2. **The executable exports its symbols.** LibreCAD is linked with `--export-dynamic` (11k+
+   dynamic FUNC symbols), so a plugin can `dlsym(RTLD_DEFAULT, ...)` internal engine functions.
+   The bridge resolves `RS_Entity::setSelected(bool)` and the `RS_EntityContainer` override,
+   because hatching consumes the current selection and the plugin API has no selection setter.
+   The `RS_Entity*` itself is read out of `Plugin_Entity` by layout (first member after the
+   vtable pointer, per the vendored `doc_plugin_interface.h`).
+
+On top of those, `lc_bridge_native.cpp` implements:
+
+- `exec_command` — raw command injection.
+- `select_entities` — set the drawing selection to a list of entity handles. Container entities
+  (polylines etc.) get the container override so their members are selected too, which the hatch
+  action's `ResolveAll` walk requires.
+- `cmd_dim` — escape, dimension command, three coordinates, escape. Verified by counting
+  entities of the expected DIM type before and after.
+- `cmd_hatch` — select the boundary, arm a 25 ms timer that waits for the modal `QG_DlgHatch`,
+  fill `cbPattern`/`leScale`/`leAngle`/`cbSolid` by object name, accept it, then run `hatch`.
+  The timer fires inside the dialog's own `exec()` loop. Verified by counting HATCH entities.
+
+Fragility is the price: widget object names, command spellings, mangled symbol names, and the
+`Plugin_Entity` layout are all LibreCAD internals with no compatibility promise. Everything
+fails soft — a missing widget or symbol turns the operations into `"unavailable"` errors (which
+is also how they behave against the offline stub, whose tests assert exactly that). Undo still
+collapses to one step per session: the injected actions' undo cycles nest inside `execPlug()`'s
+outer `LC_UndoSection` like everything else.
+
+Dimension appearance follows the drawing's dimension variables (`$DIMTXT`, `$DIMASZ`, `$DIMEXO`,
+`$DIMEXE`, ...), which `addVariable()` can set through the ordinary `set_variable` operation.
 
 ---
 

@@ -770,3 +770,67 @@ class Document:
             self.add_text(label, (cx, cy + style.text_gap),
                           height=style.text_height, angle=tangle,
                           halign="center", valign="bottom")
+
+    # -- native operations (command injection; real DIMENSION / HATCH) ----------
+    #
+    # These run inside LibreCAD through its command line and internal symbols,
+    # because the plugin API cannot create dimension or hatch entities. They
+    # need a real LibreCAD session; against the offline stub they raise
+    # BridgeError("unavailable"). Check native_status() to probe.
+
+    def native_status(self) -> dict[str, Any]:
+        """{"commands": bool, "selection": bool, "reason": str}."""
+        return self._call_now("native_status")
+
+    def exec_command(self, command: str) -> None:
+        """Feed one line to LibreCAD's command widget, as if typed.
+
+        Escape hatch to every command-line feature the bridge does not wrap.
+        Write-only: commands report to the widget's history, not back here.
+        """
+        self._call_now("exec_command", command=str(command))
+
+    def select(self, entities: list["Entity"],
+               deselect_others: bool = True) -> int:
+        """Set the drawing selection to ``entities``; returns how many."""
+        return self._call_now(
+            "select_entities",
+            handles=[entity._handle for entity in entities],
+            deselect_others=deselect_others)
+
+    def cad_dim(self, kind: str, p1: Any, p2: Any, dimline: Any) -> None:
+        """A real DIMENSION entity via LibreCAD's own dimension action.
+
+        ``kind`` is "aligned", "linear", "horizontal", or "vertical"; ``p1``
+        and ``p2`` are the extension line origins and ``dimline`` a point on
+        the dimension line. Text, arrows, and sizing follow the drawing's
+        dimension settings ($DIMTXT and friends -- set_variable() reaches
+        them). The result is associative and editable in LibreCAD, unlike the
+        drawn dim_*() methods.
+        """
+        self._call_now("cmd_dim", kind=kind,
+                       p1=_pt(p1), p2=_pt(p2), dimline=_pt(dimline))
+
+    def cad_dim_aligned(self, p1: Any, p2: Any, dimline: Any) -> None:
+        self.cad_dim("aligned", p1, p2, dimline)
+
+    def cad_dim_horizontal(self, p1: Any, p2: Any, dimline: Any) -> None:
+        self.cad_dim("horizontal", p1, p2, dimline)
+
+    def cad_dim_vertical(self, p1: Any, p2: Any, dimline: Any) -> None:
+        self.cad_dim("vertical", p1, p2, dimline)
+
+    def cad_hatch(self, entities: list["Entity"], pattern: str = "ANSI31",
+                  scale: float = 1.0, angle: float = 0.0,
+                  solid: bool = False) -> None:
+        """A real HATCH entity over a closed boundary.
+
+        ``entities`` are the boundary (from doc.entities()); they must form a
+        closed contour or LibreCAD creates nothing and this raises. The hatch
+        action's pattern dialog is filled in and accepted automatically.
+        ``angle`` in radians, like everything else here.
+        """
+        self._call_now("cmd_hatch",
+                       handles=[entity._handle for entity in entities],
+                       pattern=pattern, scale=float(scale),
+                       angle=float(angle), solid=solid)

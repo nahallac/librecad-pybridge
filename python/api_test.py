@@ -155,6 +155,21 @@ def main() -> int:
         check(isinstance(doc.real_to_string(1.5, units=2, precision=1), str),
               "real_to_string formats")
 
+        # -- native operations --------------------------------------------------
+        status = doc.native_status()
+        check({"commands", "selection", "reason"} <= set(status),
+              "native_status shape")
+        if not status["commands"]:
+            for call in (lambda: doc.exec_command("zoom"),
+                         lambda: doc.cad_dim_aligned((0, 0), (10, 0), (5, 5)),
+                         lambda: doc.cad_hatch([])):
+                try:
+                    call()
+                    check(False, "native op must be unavailable on the stub")
+                except BridgeError as error:
+                    check(error.code == "unavailable",
+                          f"native op reports unavailable ({error.code})")
+
         released = doc.release()
         check(isinstance(released, int), f"release() ({released} handles)")
         doc.update_view()

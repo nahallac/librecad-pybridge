@@ -28,6 +28,7 @@ class QLocalSocket;
 namespace lcbridge {
 
 class Dispatcher;
+class NativeBridge;
 
 /**
  * Line protocol: one JSON object per line in each direction, UTF-8, '\n'
@@ -46,7 +47,10 @@ class BridgeServer : public QObject
     Q_OBJECT
 
 public:
-    explicit BridgeServer(Document_Interface *doc, QObject *parent = nullptr);
+    //! \a native enables the in-process operations (exec_command, cmd_dim,
+    //! cmd_hatch, select_entities); without it they report "unavailable".
+    explicit BridgeServer(Document_Interface *doc, NativeBridge *native = nullptr,
+                          QObject *parent = nullptr);
     ~BridgeServer() override;
 
     //! Socket path used when none is given: $LC_PYBRIDGE_SOCKET if set,

@@ -87,10 +87,30 @@ so results always reflect what was queued, and an exception discards the unsent 
 objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handle, `update()` and
 `remove()` end it — further use raises `StaleEntityError`, re-fetch with `doc.entities()`.
 
-### Dimensions
+### Real dimensions and hatches
 
-LibreCAD's plugin interface cannot create DIMENSION entities (every `DIM*` case is disabled
-upstream), so the API draws them instead: extension lines, dimension line, tick or arrow
+`cad_dim_*()` and `cad_hatch()` create **real DIMENSION and HATCH entities** — associative,
+editable with LibreCAD's own tools. The plugin API cannot make either, so the bridge drives
+LibreCAD's command line from in-process instead (and auto-fills the hatch pattern dialog). This
+couples to LibreCAD internals; against a LibreCAD where the hooks are missing the operations
+report `unavailable` instead of failing strangely. Appearance follows the drawing's dimension
+variables, reachable via `set_variable` (`$DIMTXT`, `$DIMASZ`, ...).
+
+```python
+doc.set_variable("$DIMTXT", 60.0)                    # dimension text height
+doc.cad_dim_horizontal((0, 0), (1200, 0), (600, -150))
+doc.cad_dim_aligned(p1, p2, dimline_point)
+boundary = [e for e in doc.entities(types=["POLYLINE"]) if e["layer"] == "HOLE"]
+doc.cad_hatch(boundary, pattern="ANSI31", scale=10.0)
+doc.exec_command("zoomauto")                         # raw command-line access
+```
+
+`python/examples/native_demo.py` draws a hatched, dimensioned plate. See `docs/findings.md`,
+"Native access", for how this works and what it depends on.
+
+### Drawn dimensions
+
+The portable fallback: the API can also draw dimensions out of plain lines and text: extension lines, dimension line, tick or arrow
 terminators, and a measured label. They measure and print correctly, but they are plain geometry —
 not associative, and LibreCAD's dimension tools will not edit them.
 

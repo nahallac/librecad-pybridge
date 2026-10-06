@@ -1,6 +1,6 @@
 # Offline check for the dispatch layer: links the dispatcher and its self-test
 # against a stub Document_Interface, so `make test` needs no LibreCAD process.
-QT += core network
+QT += core network widgets
 CONFIG += console c++17
 CONFIG -= app_bundle
 TEMPLATE = app
@@ -16,11 +16,13 @@ SOURCES += \
     main.cpp \
     fake_document.cpp \
     $$PWD/../../plugin/lc_bridge_dispatch.cpp \
+    $$PWD/../../plugin/lc_bridge_native.cpp \
     $$PWD/../../plugin/lc_bridge_selftest.cpp \
     $$PWD/../../plugin/lc_bridge_server.cpp
 
 HEADERS += \
     fake_document.h \
     $$PWD/../../plugin/lc_bridge_dispatch.h \
+    $$PWD/../../plugin/lc_bridge_native.h \
     $$PWD/../../plugin/lc_bridge_selftest.h \
     $$PWD/../../plugin/lc_bridge_server.h
