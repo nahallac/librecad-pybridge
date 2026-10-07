@@ -48,7 +48,16 @@ happen silently.
 ## Using it
 
 Open a drawing, then **Plugins → Start Python bridge**. Plugin menu entries are disabled while no
-drawing is open. A small status strip appears in the corner of the LibreCAD window; the session
+drawing is open. Or skip the click: with `LC_PYBRIDGE_AUTOSTART=1` in LibreCAD's environment the
+plugin starts the session itself as soon as a drawing is open, so
+
+```bash
+LC_PYBRIDGE_AUTOSTART=1 librecad plate.dxf &
+```
+
+is a listening bridge with no one at the keyboard; add `QT_QPA_PLATFORM=offscreen` for no window
+at all. `Document.launch(drawing, headless=...)` in the Python client does exactly this and
+returns a connected `Document` (the process is on `doc.process`). A small status strip appears in the corner of the LibreCAD window; the session
 serves Python clients until you press *Stop* or a client sends `{"op": "shutdown"}`. LibreCAD
 stays usable while the session runs, and everything the session does is **one undo step**, by
 design.

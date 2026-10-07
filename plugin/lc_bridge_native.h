@@ -61,6 +61,11 @@ struct SessionRestart
 //! because it runs after the session's NativeBridge is gone.
 bool performSessionRestart(const SessionRestart &restart, QString *error);
 
+//! True once the application window exists and has a current document --
+//! the state in which LibreCAD enables plugin menu entries. False on a
+//! version mismatch. Used by the auto-start poll.
+bool hasActiveDocument();
+
 class NativeBridge : public QObject
 {
     Q_OBJECT

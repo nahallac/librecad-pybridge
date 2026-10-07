@@ -41,6 +41,7 @@ bool NativeBridge::saveAs(const QString &, const QString &) { return false; }
 bool NativeBridge::undoCheckpoint() { return false; }
 bool NativeBridge::undo(int, bool, int *) { return false; }
 void NativeBridge::ensureUndoCycle() {}
+bool hasActiveDocument() { return false; }
 bool performSessionRestart(const SessionRestart &, QString *error)
 {
     *error = QStringLiteral("native layer not built into dispatchtest");

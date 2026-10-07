@@ -138,6 +138,14 @@ bool performSessionRestart(const SessionRestart &restart, QString *error)
     return false;
 }
 
+bool hasActiveDocument()
+{
+    if (!versionMatches())
+        return false;
+    QC_ApplicationWindow *app = QC_ApplicationWindow::getAppWindow().get();
+    return app && app->getDocument() != nullptr;
+}
+
 QString NativeBridge::builtAgainst()
 {
     return QStringLiteral(LC_PYBRIDGE_LIBRECAD_VERSION);

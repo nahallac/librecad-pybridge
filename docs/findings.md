@@ -121,6 +121,10 @@ On top of those, `lc_bridge_native.cpp` implements:
   to the plugin object) to start a new session on the now-active window. The Python client waits
   for the old socket to disappear and reconnects; entity handles carry a generation number so
   the old ones go stale. Verified live 2026-10-06.
+- Auto-start (`LC_PYBRIDGE_AUTOSTART`) — the plugin is instantiated at load, before the main
+  window exists, so its constructor polls every 100 ms until `hasActiveDocument()` (app window
+  with a document) and then triggers the same `QAction`. The session-ended `QMessageBox` becomes
+  a status-bar message in that mode: nothing would dismiss a modal box in an unattended run.
 
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session

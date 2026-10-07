@@ -15,6 +15,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QStatusBar>
+#include <QMainWindow>
 #include <QPushButton>
 #include <QString>
 
@@ -28,6 +30,54 @@ namespace {
 const char *const kPluginTitle = "Python Bridge";
 
 } // namespace
+
+bool autoStartRequested()
+{
+    const QByteArray value = qgetenv("LC_PYBRIDGE_AUTOSTART").trimmed().toLower();
+    return !value.isEmpty() && value != "0" && value != "false" && value != "no";
+}
+
+LC_PyBridge::LC_PyBridge()
+{
+    // Loaded at startup, before the main window and its first document
+    // exist, so the auto-start has to wait for them. The menu QAction that
+    // LibreCAD will parent to this object does not exist yet either.
+    if (!autoStartRequested())
+        return;
+    m_autoStartTimer = new QTimer(this);
+    m_autoStartTimer->setInterval(100);
+    m_autoStartPollsLeft = 600;   // give up after a minute
+    connect(m_autoStartTimer, &QTimer::timeout, this, &LC_PyBridge::pollAutoStart);
+    m_autoStartTimer->start();
+}
+
+bool LC_PyBridge::triggerMenuAction()
+{
+    const QList<QAction *> actions = findChildren<QAction *>();
+    for (QAction *action : actions) {
+        if (action->isEnabled()) {
+            action->trigger();
+            return true;
+        }
+    }
+    return false;
+}
+
+void LC_PyBridge::pollAutoStart()
+{
+    if (m_autoStarted || --m_autoStartPollsLeft <= 0) {
+        m_autoStartTimer->stop();
+        return;
+    }
+    // Plugin actions are enabled once a document is open; the engine check
+    // guards against triggering before LibreCAD has finished wiring them.
+    if (!lcbridge::hasActiveDocument())
+        return;
+    if (triggerMenuAction()) {
+        m_autoStarted = true;
+        m_autoStartTimer->stop();
+    }
+}
 
 QString LC_PyBridge::name() const
 {
@@ -147,9 +197,17 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
 
     const lcbridge::SessionRestart restart = server.pendingRestart();
     if (restart.kind == lcbridge::SessionRestart::None) {
-        QMessageBox::information(parent, tr(kPluginTitle),
-                                 tr("Bridge session ended after %1 requests.")
-                                     .arg(handled));
+        // A modal box is wrong for an unattended (auto-started, possibly
+        // headless) run: nothing would ever dismiss it.
+        auto *mainWindow = qobject_cast<QMainWindow *>(parent);
+        if (autoStartRequested() && mainWindow) {
+            mainWindow->statusBar()->showMessage(
+                tr("Bridge session ended after %1 requests.").arg(handled), 5000);
+        } else {
+            QMessageBox::information(parent, tr(kPluginTitle),
+                                     tr("Bridge session ended after %1 requests.")
+                                         .arg(handled));
+        }
         return;
     }
 
@@ -165,13 +223,8 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
                                      .arg(error));
             return;
         }
-        const QList<QAction *> actions = findChildren<QAction *>();
-        for (QAction *action : actions) {
-            if (action->isEnabled()) {
-                action->trigger();
-                return;
-            }
-        }
+        if (triggerMenuAction())
+            return;
         QMessageBox::warning(parent, tr(kPluginTitle),
                              tr("Drawing opened, but the bridge menu action "
                                 "was not found; start the bridge by hand."));

@@ -418,6 +418,50 @@ class Document:
                 timeout: float | None = 30.0) -> "Document":
         return cls(Bridge(path, timeout))
 
+    @classmethod
+    def launch(cls, drawing: str | None = None, *, socket_path: str | None = None,
+               headless: bool = False, startup_timeout: float = 60.0,
+               timeout: float | None = 30.0,
+               librecad: str = "librecad") -> "Document":
+        """Start LibreCAD with the bridge auto-started and connect to it.
+
+        Sets LC_PYBRIDGE_AUTOSTART so the plugin opens a session as soon as
+        the drawing is up; ``headless`` runs it on Qt's offscreen platform
+        (no window). The process is on the returned Document as
+        ``process``; end it with doc.process.terminate() when done --
+        shutdown() only ends the session.
+        """
+        import subprocess
+        env = dict(os.environ)
+        env["LC_PYBRIDGE_AUTOSTART"] = "1"
+        socket_path = socket_path or default_socket_path()
+        env["LC_PYBRIDGE_SOCKET"] = socket_path
+        if headless:
+            env["QT_QPA_PLATFORM"] = "offscreen"
+        argv = [librecad] + ([os.path.abspath(drawing)] if drawing else [])
+        process = subprocess.Popen(argv, env=env,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + startup_timeout
+        while True:
+            try:
+                bridge = Bridge(socket_path, timeout)
+                bridge.request("ping")
+                break
+            except (OSError, BridgeError, ProtocolError):
+                if process.poll() is not None:
+                    raise BridgeError("launch_failed",
+                                      f"{librecad} exited with "
+                                      f"{process.returncode}") from None
+                if time.monotonic() > deadline:
+                    process.terminate()
+                    raise BridgeError("launch_timeout",
+                                      "no bridge session appeared") from None
+                time.sleep(0.2)
+        doc = cls(bridge)
+        doc.process = process
+        return doc
+
     def __enter__(self) -> "Document":
         return self
 
