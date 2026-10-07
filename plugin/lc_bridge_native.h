@@ -32,11 +32,15 @@
 #ifndef LC_BRIDGE_NATIVE_H
 #define LC_BRIDGE_NATIVE_H
 
+#include <QList>
 #include <QObject>
 #include <QPointF>
+#include <QSize>
 #include <QString>
+#include <QVariantMap>
 
 class Plug_Entity;
+class RS_Entity;
 class QG_CommandWidget;
 class QTimer;
 class QWidget;
@@ -168,8 +172,60 @@ public:
     void disarmHatchDialog();
     bool hatchDialogHandled() const { return m_hatchDialogHandled; }
 
+    // ---- Creation: entities the plugin API cannot make -------------------
+    //
+    // Each of these builds the engine entity directly and commits it the way
+    // the corresponding LibreCAD action's trigger() does: active layer and
+    // pen, update(), addEntity() on the document, one nested undo cycle
+    // around addUndoable(), redraw. Nothing goes through the command line,
+    // so no entity pick is needed. All need modificationAvailable(); false
+    // with lastError() set on a refusal. Angles are radians.
+
+    //! MTEXT at \a at (its attachment point, per \a halign / \a valign,
+    //! which take DPI::HAlign / DPI::VAlign values). \a width is the
+    //! reference rectangle width, \a lineSpacing the line spacing factor.
+    bool addMText(const QString &text, const QString &style, const QPointF &at,
+                  double height, double width, double angle, int halign,
+                  int valign, double lineSpacing);
+    //! Pixel size of the image file at \a path; false when Qt cannot read it.
+    bool imagePixelSize(const QString &path, QSize *size) const;
+    //! IMAGE of the file at \a path (absolute), lower left corner at \a at,
+    //! each pixel \a scale drawing units wide, rotated by \a angle.
+    bool addImage(const QString &path, const QPointF &at, double scale,
+                  double angle, int brightness, int contrast, int fade);
+    //! DIMALIGNED between \a p1 and \a p2, dimension line through \a dimLine.
+    //! \a text: empty for the measured value, "<>" inside it is replaced by
+    //! the measurement, " " suppresses it (RS_Dimension::getLabel).
+    bool dimAligned(const QPointF &p1, const QPointF &p2, const QPointF &dimLine,
+                    const QString &text);
+    //! DIMLINEAR measuring along \a angle (0 horizontal, pi/2 vertical).
+    bool dimLinear(const QPointF &p1, const QPointF &p2, const QPointF &dimLine,
+                   double angle, const QString &text);
+    //! DIMRADIAL (or DIMDIAMETRIC with \a diametric) of the circle \a center,
+    //! \a radius, pointing at the circle in direction \a angle.
+    bool dimRadial(const QPointF &center, double radius, double angle,
+                   const QString &text, bool diametric);
+    //! DIMANGULAR between the lines \a l1a-\a l1b and \a l2a-\a l2b, its arc
+    //! through \a dimLine; the angle measured is the one of the four
+    //! sectors around the intersection that contains \a dimLine.
+    bool dimAngular(const QPointF &l1a, const QPointF &l1b, const QPointF &l2a,
+                    const QPointF &l2b, const QPointF &dimLine,
+                    const QString &text);
+    //! LEADER through \a points (at least two), arrow head at the first.
+    bool dimLeader(const QList<QPointF> &points, bool arrowHead);
+    //! HATCH whose single boundary loop holds copies of \a boundary (atomic
+    //! members of containers such as polylines), like the hatch action.
+    bool addHatch(const QList<Plug_Entity *> &boundary, const QString &pattern,
+                  double scale, double angle, bool solid);
+    //! Read-only attributes getData() does not report: dimension geometry
+    //! and label, leader vertices, MTEXT layout, hatch pattern. Points are
+    //! two-element lists. False when the entity has none or no native access.
+    bool entityDetails(Plug_Entity *entity, QVariantMap *details) const;
+
 private:
     void pollForHatchDialog();
+    //! What every creating action's trigger() does with its new entity.
+    void commitNewEntity(RS_Entity *entity, bool update);
 
     bool m_versionOk {false};
     QG_CommandWidget *m_commandWidget {nullptr};

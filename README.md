@@ -119,9 +119,10 @@ version it was built against with the one running and, on a mismatch, these oper
 `unavailable` instead of failing strangely (`native_status` shows both strings). The stub server
 used by the tests reports the same.
 
-**Real dimensions and hatches.** `cad_dim_*()` and `cad_hatch()` create **real DIMENSION and
+**Real dimensions and hatches.** `cad_dim()` and `cad_hatch()` create **real DIMENSION and
 HATCH entities** — associative, editable with LibreCAD's own tools — by driving LibreCAD's command
-line from in-process (and auto-filling the hatch pattern dialog). Appearance follows the drawing's
+line from in-process (and auto-filling the hatch pattern dialog); the `cad_dim_*()` helpers and
+`add_hatch()` build the same entities directly (see "Creation through the engine" below). Appearance follows the drawing's
 dimension variables, reachable via `set_variable` (`$DIMTXT`, `$DIMASZ`, ...).
 
 ```python
@@ -169,6 +170,39 @@ have LibreCAD open the drawing in a new window and start a fresh session on it, 
 Every `Entity` from before is stale afterwards; the `Document` object carries over. If LibreCAD
 shows a dialog during the open (an unreadable file, say), the restart waits for it and the client
 times out.
+
+**Creation through the engine.** MTEXT, IMAGE, HATCH and every dimension kind, built directly
+the way LibreCAD's own tools build them — no command line, no picks — and returned as `Entity`
+objects. Angles are radians; dimension text is `None` for the measured value, `"<>"` inside it
+stands for the measurement, `" "` hides it.
+
+```python
+note = doc.add_mtext("Line one\nLine two", (0, 0), 2.5)          # top-left attached by default
+img = doc.add_image("site.png", (0, 0), width=4000)               # or scale= (units per pixel), height=
+doc.cad_dim_aligned((0, 0), (3000, 4000), (-500, 2000))           # DIMALIGNED, label "5000"
+doc.cad_dim_horizontal(p1, p2, dimline)                           # DIMLINEAR at angle 0
+doc.cad_dim_linear(p1, p2, dimline, angle=math.radians(30))
+circle = doc.entities(types=["CIRCLE"])[0]
+doc.cad_dim_radial(circle, angle=math.pi / 4)                     # or (center, radius)
+doc.cad_dim_diametric((500, 500), 120, text="<> TYP")
+doc.cad_dim_angular(wall_a, wall_b, (300, 200))                   # LINE entities or point pairs
+doc.cad_dim_leader([(0, 0), (200, 150), (400, 150)])              # arrow at the first point
+doc.add_hatch([outline], pattern="ANSI31", scale=10)              # raises on an open boundary
+```
+
+- `cad_dim_angular` measures the one of the four sectors around the lines' intersection that
+  contains the third point, with its arc through that point; the lines need not touch.
+- `add_image` references the file (absolute path while the drawing is unnamed; LibreCAD stores it
+  relative to the drawing's folder once the drawing has a file name). Any format Qt reads.
+- `add_hatch` copies the boundary into the hatch, like LibreCAD's hatch tool; unlike `cad_hatch`
+  it needs no selection or dialog, and an unknown pattern or a scale too large for the contour is
+  an error instead of an empty hatch.
+- `cad_dim()` still drives the command line; the `cad_dim_*` helpers use the direct path.
+- `get_entities` / `entity_data` rows now carry what the plugin API leaves out: for dimensions
+  `definition_point`, `text`, `label` (as drawn) and the kind's points (`extension_point1/2`,
+  `definition_point2`, `definition_point1..4` and `center` for angular); `vertices` and `arrow`
+  for leaders; `width`, `halign`, `valign`, `line_spacing`, `style` for MTEXT; `pattern`,
+  `scale`, `angle`, `solid` for hatches. Points are `[x, y]`; these fields are read-only.
 
 `python/examples/native_demo.py` draws a hatched, dimensioned plate through all of this. See
 `docs/findings.md`, "Native access", for how it works and what it depends on.
@@ -245,6 +279,7 @@ Conventions, uniform across every operation:
 | Undo* | `undo_checkpoint`, `undo`, `redo` |
 | Files* | `file_info`, `file_save`, `file_save_as` |
 | Session (server-level, not in the list) | `session`, `shutdown`, `file_open`* (`open`), `file_new`* (`new`) |
+| Create via the engine* | `add_mtext`, `add_image`, `add_hatch`, `dim_aligned` (`cad_dim_aligned`), `dim_linear` (`cad_dim_linear`, `cad_dim_horizontal`, `cad_dim_vertical`), `dim_radial` (`cad_dim_radial`), `dim_diametric` (`cad_dim_diametric`), `dim_angular` (`cad_dim_angular`), `dim_leader` (`cad_dim_leader`) |
 
 \* native layer; `unavailable` on a version mismatch or the stub.
 
@@ -316,8 +351,6 @@ Still missing, roughly in order of value:
 
 - Remaining modify tools through `RS_Modification`: move/rotate/scale with copies, stretch,
   fillet (round), chamfer (bevel), cut, bulk attribute change, revert direction.
-- Creation gaps: `add_mtext` (the plugin API has `addMText`, unwrapped), `add_image`, the other
-  dimension kinds (radial, diametric, angular, leader) through the command line.
 - Layer state (freeze, lock, hide, rename) and block definition from entities.
 - View and windows: zoom, visible area, `file_close`, listing and switching documents (every
   `open()` leaves its window behind), export to PDF/SVG.

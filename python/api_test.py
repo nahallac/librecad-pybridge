@@ -178,7 +178,17 @@ def main() -> int:
                          lambda: doc.undo_checkpoint(),
                          lambda: doc.undo(),
                          lambda: doc.open("/nonexistent.dxf"),
-                         lambda: doc.new()):
+                         lambda: doc.new(),
+                         lambda: doc.add_mtext("x", (0, 0), 2.5),
+                         lambda: doc.add_image("/nonexistent.png", (0, 0)),
+                         lambda: doc.cad_dim_linear((0, 0), (10, 0), (5, 5)),
+                         lambda: doc.cad_dim_horizontal((0, 0), (10, 0), (5, 5)),
+                         lambda: doc.cad_dim_radial(probe),
+                         lambda: doc.cad_dim_diametric((0, 0), 5),
+                         lambda: doc.cad_dim_angular(((0, 0), (1, 0)),
+                                                     ((0, 0), (0, 1)), (1, 1)),
+                         lambda: doc.cad_dim_leader([(0, 0), (5, 5)]),
+                         lambda: doc.add_hatch([probe])):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

@@ -18,6 +18,7 @@
 #include <QJsonValue>
 #include <QString>
 #include <QStringList>
+#include <QVariant>
 
 class Document_Interface;
 class Plug_Entity;
@@ -167,6 +168,17 @@ private:
     QJsonValue opRedo(const QJsonObject &args);
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
+    // Creation through the engine (roadmap item 2): entities the plugin API
+    // cannot make, built directly like the LibreCAD actions build them.
+    QJsonValue opAddMText(const QJsonObject &args);
+    QJsonValue opAddImage(const QJsonObject &args);
+    QJsonValue opDimAligned(const QJsonObject &args);
+    QJsonValue opDimLinear(const QJsonObject &args);
+    QJsonValue opDimRadial(const QJsonObject &args);
+    QJsonValue opDimDiametric(const QJsonObject &args);
+    QJsonValue opDimAngular(const QJsonObject &args);
+    QJsonValue opDimLeader(const QJsonObject &args);
+    QJsonValue opAddHatch(const QJsonObject &args);
 
     //! Entities of \a dpiType currently in the drawing.
     int countEntitiesOfType(int dpiType);
@@ -191,6 +203,16 @@ private:
     QJsonArray newEntitiesSince(const QSet<const void *> &before);
     //! Forget the handles in  handles (the entities were replaced).
     void invalidateHandles(const QJsonArray &handles);
+    //! The "data" object of an entity row: the attribute hash by name, plus
+    //! what the native layer reads that getData() does not report
+    //! (dimension geometry and label, leader vertices, MTEXT layout, hatch
+    //! pattern) when it is available.
+    QJsonObject rowData(Plug_Entity *entity, int type,
+                        const QHash<int, QVariant> &data) const;
+    //! The handle-valued argument  name, resolved like "handle".
+    Plug_Entity *lookupEntityArg(const QJsonObject &args, const QString &name) const;
+    //! Shared body of dim_radial / dim_diametric.
+    QJsonValue radialDimension(const QJsonObject &args, bool diametric);
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

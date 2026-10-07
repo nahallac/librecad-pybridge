@@ -55,5 +55,25 @@ bool NativeBridge::boundingBox(Plug_Entity *, QPointF *, QPointF *) const { retu
 void NativeBridge::armHatchDialog(const QString &, double, double, bool, int) {}
 void NativeBridge::disarmHatchDialog() {}
 void NativeBridge::pollForHatchDialog() {}
+// Creation through the engine.
+bool NativeBridge::addMText(const QString &, const QString &, const QPointF &,
+                            double, double, double, int, int, double) { return false; }
+bool NativeBridge::imagePixelSize(const QString &, QSize *) const { return false; }
+bool NativeBridge::addImage(const QString &, const QPointF &, double, double,
+                            int, int, int) { return false; }
+bool NativeBridge::dimAligned(const QPointF &, const QPointF &, const QPointF &,
+                              const QString &) { return false; }
+bool NativeBridge::dimLinear(const QPointF &, const QPointF &, const QPointF &,
+                             double, const QString &) { return false; }
+bool NativeBridge::dimRadial(const QPointF &, double, double, const QString &,
+                             bool) { return false; }
+bool NativeBridge::dimAngular(const QPointF &, const QPointF &, const QPointF &,
+                              const QPointF &, const QPointF &,
+                              const QString &) { return false; }
+bool NativeBridge::dimLeader(const QList<QPointF> &, bool) { return false; }
+bool NativeBridge::addHatch(const QList<Plug_Entity *> &, const QString &,
+                            double, double, bool) { return false; }
+bool NativeBridge::entityDetails(Plug_Entity *, QVariantMap *) const { return false; }
+void NativeBridge::commitNewEntity(RS_Entity *, bool) {}
 
 } // namespace lcbridge

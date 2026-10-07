@@ -126,6 +126,44 @@ On top of those, `lc_bridge_native.cpp` implements:
   with a document) and then triggers the same `QAction`. The session-ended `QMessageBox` becomes
   a status-bar message in that mode: nothing would dismiss a modal box in an unattended run.
 
+- Creation through the engine (2026-10-06): `add_mtext`, `add_image`, `add_hatch`, and
+  `dim_aligned` / `dim_linear` / `dim_radial` / `dim_diametric` / `dim_angular` / `dim_leader`
+  construct the engine entities directly and commit them the way each action's `trigger()` does
+  (active layer and pen, `update()`, `addEntity`, a nested `startUndoCycle` / `addUndoable` /
+  `endUndoCycle`, redraw). Every constructor involved is exported (`RS_MText`, `RS_Image`,
+  `RS_Hatch`, `RS_Leader`, `RS_Dim{Aligned,Linear,Radial,Diametric,Angular}`, their data
+  structs, `RS_EntityContainer`), so nothing needs the command widget and no entity has to be
+  picked; radial/diametric take the circle's centre and radius, angular the two lines' end
+  points. Constructing these classes binds only their constructors: their vtables live in the
+  executable, and the data structs' only virtual base (`RS_Flags`, inline virtual destructor)
+  gets vague-linkage copies, so `make check`'s load test still passes. Findings on the way:
+  - **MTEXT is not in the plugin API**: `addMText` is a member of `Doc_plugin_interface` only,
+    not of `Document_Interface` (see "Build environment"), so MTEXT goes through the native
+    layer like the rest, which also exposes the width and line spacing `addMText` fixes.
+  - **Angular dimensions**: `RS_DimAngular` draws its arc counterclockwise from the direction
+    definitionPoint1→definitionPoint2 to definitionPoint3→definitionPoint, at the radius of
+    definitionPoint4. A verbatim port of the action's quadrant table (`setData()` in
+    `rs_actiondimangular.cpp`, with the pick taken at each line's free end) labelled the sector
+    opposite two lines that meet at a corner 300° instead of 60°; the bridge therefore orders the
+    line end points along the two rays bounding the sector that holds the arc point. Verified for
+    all four sectors (60/120/60/120 for lines at 60°) and for lines that do not touch.
+  - **Image paths**: `RS_Image::update()` rewrites the file name relative to the drawing's folder
+    (`imageRelativePathName`, via `QC_ApplicationWindow::getAppWindow()->getDocument()`). For an
+    unnamed drawing that folder is LibreCAD's working directory, and a saved DXF then points at
+    `../../..` from wherever it was saved. `add_image` restores the absolute path (inline
+    `setFile`) while the drawing is unnamed and keeps LibreCAD's relative form otherwise.
+  - **Hatch errors**: an unknown pattern name does not report `HATCH_PATTERN_NOT_FOUND`; the
+    pattern list returns an empty pattern and `update()` reports `HATCH_TOO_SMALL`. `add_hatch`
+    runs `update()` before committing and deletes the hatch on any error, so nothing empty is
+    left behind (the action keeps it). `validate()` catches open boundaries first.
+  - `get_entities` rows gain the dimension geometry and drawn label
+    (`RS_Dimension::getLabel(true)`), leader vertices, MTEXT layout and hatch pattern, read
+    through inline accessors; `Plugin_Entity::getData()` reports only the type for these.
+  Verified live 2026-10-06 headless: each op created its entity with the expected data, `undo()`
+  removed each one as its own step and `redo()` restored it, and `save_as` wrote MTEXT, IMAGE +
+  IMAGEDEF, DIMENSION, LEADER and HATCH sections that LibreCAD read back intact (images found
+  relative to the DXF).
+
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session
 (`python/examples/native_demo.py`). One detail found only at runtime: the command widget's

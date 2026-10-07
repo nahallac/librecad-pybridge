@@ -1070,7 +1070,12 @@ class Document:
         return self._rows(rows)
 
     def cad_dim(self, kind: str, p1: Any, p2: Any, dimline: Any) -> None:
-        """A real DIMENSION entity via LibreCAD's own dimension action.
+        """A real DIMENSION entity via LibreCAD's command line.
+
+        Command path: types the dimension command and its three points into
+        LibreCAD's command widget, so the real action runs. Kept for
+        compatibility; cad_dim_aligned() / cad_dim_linear() and friends build
+        the same entities directly and return them.
 
         ``kind`` is "aligned", "linear", "horizontal", or "vertical"; ``p1``
         and ``p2`` are the extension line origins and ``dimline`` a point on
@@ -1082,14 +1087,30 @@ class Document:
         self._call_now("cmd_dim", kind=kind,
                        p1=_pt(p1), p2=_pt(p2), dimline=_pt(dimline))
 
-    def cad_dim_aligned(self, p1: Any, p2: Any, dimline: Any) -> None:
-        self.cad_dim("aligned", p1, p2, dimline)
+    def cad_dim_aligned(self, p1: Any, p2: Any, dimline: Any,
+                        text: str | None = None) -> Entity:
+        """A real DIMALIGNED entity measuring p1-p2 along its own direction.
 
-    def cad_dim_horizontal(self, p1: Any, p2: Any, dimline: Any) -> None:
-        self.cad_dim("horizontal", p1, p2, dimline)
+        Direct path: built by the engine like the dimension action builds it
+        (no command line). ``dimline`` is any point the dimension line should
+        pass through. ``text`` overrides the label: None for the measured
+        value, "<>" inside the text stands for the measurement, " "
+        suppresses it. Returns the new entity; its data carries
+        ``definition_point``, ``extension_point1/2`` and the drawn ``label``.
+        """
+        return self._create("dim_aligned", p1=_pt(p1), p2=_pt(p2),
+                            dimline=_pt(dimline), **self._dim_text(text))
 
-    def cad_dim_vertical(self, p1: Any, p2: Any, dimline: Any) -> None:
-        self.cad_dim("vertical", p1, p2, dimline)
+    def cad_dim_horizontal(self, p1: Any, p2: Any, dimline: Any,
+                           text: str | None = None) -> Entity:
+        """A real horizontal DIMLINEAR; cad_dim_linear() with angle 0."""
+        return self.cad_dim_linear(p1, p2, dimline, 0.0, text)
+
+    def cad_dim_vertical(self, p1: Any, p2: Any, dimline: Any,
+                         text: str | None = None) -> Entity:
+        """A real vertical DIMLINEAR; cad_dim_linear() with angle pi/2."""
+        import math as _math
+        return self.cad_dim_linear(p1, p2, dimline, _math.pi / 2, text)
 
     def cad_hatch(self, entities: list["Entity"], pattern: str = "ANSI31",
                   scale: float = 1.0, angle: float = 0.0,
@@ -1105,3 +1126,153 @@ class Document:
                        handles=[entity._handle for entity in entities],
                        pattern=pattern, scale=float(scale),
                        angle=float(angle), solid=solid)
+
+    # -- creation through the engine (need a real LibreCAD session) -----------
+    #
+    # Entities the plugin API cannot make, built directly the way LibreCAD's
+    # own actions build them -- no command line, no picks. Each returns the
+    # new Entity. Not batchable: the result is needed.
+
+    def _create(self, op: str, **args: Any) -> Entity:
+        rows = self._call_now(op, **args)
+        if not rows:
+            raise BridgeError("failed", f"{op} reported no new entity")
+        return self._rows(rows)[0]
+
+    @staticmethod
+    def _dim_text(text: str | None) -> dict[str, Any]:
+        return {} if text is None else {"text": str(text)}
+
+    def add_mtext(self, text: str, at: Any, height: float, angle: float = 0.0,
+                  halign: str = "left", valign: str = "top",
+                  style: str = "standard", width: float = 100.0,
+                  line_spacing: float = 1.0) -> Entity:
+        """A multi-line text (MTEXT) entity; lines break at "\\n".
+
+        Same arguments as add_text(), plus ``width`` (the reference
+        rectangle width, LibreCAD's default 100) and ``line_spacing`` (a
+        factor). ``at`` is the attachment point named by ``halign``
+        ("left", "center", "right") and ``valign`` ("top", "middle",
+        "bottom"); unlike add_text() the default is the top left corner, as
+        LibreCAD's MText tool places it.
+        """
+        return self._create("add_mtext", text=str(text), at=_pt(at),
+                            height=float(height), angle=float(angle),
+                            halign=halign, valign=valign, style=style,
+                            width=float(width),
+                            line_spacing=float(line_spacing))
+
+    def add_image(self, path: str, at: Any, *, scale: float | None = None,
+                  width: float | None = None, height: float | None = None,
+                  angle: float = 0.0, brightness: int = 50,
+                  contrast: int = 50, fade: int = 0) -> Entity:
+        """A raster IMAGE entity referencing the file at ``path``.
+
+        ``at`` is the lower left corner. Size it with at most one of
+        ``scale`` (drawing units per pixel; the default 1, as LibreCAD's
+        image tool), ``width`` or ``height`` (of the whole image, in drawing
+        units, keeping the aspect ratio). ``angle`` rotates it about ``at``.
+        The drawing references the file, it does not embed it. Any format
+        Qt reads works (PNG, JPEG, BMP, PPM, ...).
+        """
+        args: dict[str, Any] = {"path": os.path.abspath(os.fspath(path)),
+                                "at": _pt(at), "angle": float(angle),
+                                "brightness": int(brightness),
+                                "contrast": int(contrast), "fade": int(fade)}
+        for name, value in (("scale", scale), ("width", width),
+                            ("height", height)):
+            if value is not None:
+                args[name] = float(value)
+        return self._create("add_image", **args)
+
+    def cad_dim_linear(self, p1: Any, p2: Any, dimline: Any,
+                       angle: float = 0.0, text: str | None = None) -> Entity:
+        """A real DIMLINEAR entity measuring p1-p2 along ``angle``.
+
+        Direct path. ``angle`` 0 measures horizontally, pi/2 vertically;
+        ``dimline`` is any point the dimension line should pass through.
+        ``text`` as for cad_dim_aligned().
+        """
+        return self._create("dim_linear", p1=_pt(p1), p2=_pt(p2),
+                            dimline=_pt(dimline), angle=float(angle),
+                            **self._dim_text(text))
+
+    def _circle_args(self, target: Any, radius: float | None) -> dict[str, Any]:
+        if isinstance(target, Entity):
+            return {"entity": target._handle}
+        if radius is None:
+            raise TypeError("give a CIRCLE/ARC entity, or a center and a radius")
+        return {"center": _pt(target), "radius": float(radius)}
+
+    def cad_dim_radial(self, target: Any, radius: float | None = None,
+                       angle: float = 0.785398, text: str | None = None
+                       ) -> Entity:
+        """A real DIMRADIAL entity ("R50").
+
+        Direct path; no pick needed. ``target`` is a CIRCLE or ARC Entity,
+        or a center point with ``radius``. ``angle`` (radians, from the
+        center) is where on the circle the dimension points. ``text`` as for
+        cad_dim_aligned(). The data reports ``definition_point`` (the
+        center), ``definition_point2`` (the point on the circle), ``label``.
+        """
+        return self._create("dim_radial", **self._circle_args(target, radius),
+                            angle=float(angle), **self._dim_text(text))
+
+    def cad_dim_diametric(self, target: Any, radius: float | None = None,
+                          angle: float = 0.785398, text: str | None = None
+                          ) -> Entity:
+        """A real DIMDIAMETRIC entity, across the circle through ``angle``.
+
+        Arguments as for cad_dim_radial(). The data reports the two opposite
+        points on the circle as ``definition_point`` and
+        ``definition_point2``.
+        """
+        return self._create("dim_diametric",
+                            **self._circle_args(target, radius),
+                            angle=float(angle), **self._dim_text(text))
+
+    @staticmethod
+    def _line_arg(line: Any) -> Any:
+        if isinstance(line, Entity):
+            return line._handle
+        start, end = line
+        return [_pt(start), _pt(end)]
+
+    def cad_dim_angular(self, line1: Any, line2: Any, dimline: Any,
+                        text: str | None = None) -> Entity:
+        """A real DIMANGULAR entity between two lines.
+
+        Direct path. ``line1`` and ``line2`` are LINE entities or point
+        pairs ((x1, y1), (x2, y2)); they need not touch, only not be
+        parallel. The two lines cross at a center and divide the plane into
+        four sectors; the dimension measures the sector that contains
+        ``dimline``, with its arc through that point -- as LibreCAD's tool
+        does with the last click.
+        """
+        return self._create("dim_angular", line1=self._line_arg(line1),
+                            line2=self._line_arg(line2),
+                            dimline=_pt(dimline), **self._dim_text(text))
+
+    def cad_dim_leader(self, points: list[Any], arrow: bool = True) -> Entity:
+        """A real LEADER entity: a polyline of ``points`` (at least two)
+        with an arrow head at the first point unless ``arrow`` is False.
+        Size follows $DIMASZ. It carries no text; add one with add_mtext()."""
+        return self._create("dim_leader", points=[_pt(p) for p in points],
+                            arrow=bool(arrow))
+
+    def add_hatch(self, entities: list["Entity"], pattern: str = "ANSI31",
+                  scale: float = 1.0, angle: float = 0.0,
+                  solid: bool = False) -> Entity:
+        """A real HATCH entity bounded by ``entities``, built directly.
+
+        Unlike cad_hatch() no selection, command or dialog is involved and
+        the hatch is returned. ``entities`` (lines, arcs, circles, ellipses,
+        polylines, splines) must form closed contours; the hatch keeps
+        copies of them as its boundary, the originals stay. Raises
+        BridgeError("failed") for an open boundary, an unknown pattern, or
+        a scale LibreCAD refuses as too dense or too sparse for the area.
+        """
+        return self._create("add_hatch",
+                            handles=[entity._handle for entity in entities],
+                            pattern=pattern, scale=float(scale),
+                            angle=float(angle), solid=bool(solid))
