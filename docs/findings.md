@@ -96,6 +96,31 @@ On top of those, `lc_bridge_native.cpp` implements:
   wraps its work in `LC_UndoSection`, which nests in the session's outer section like the
   injected commands do. Verified live 2026-10-06 (offset/mirror/explode/trim, including
   `both`).
+- `undo_checkpoint`, `undo`, `redo` — `RS_Undo` counts nested `startUndoCycle()` calls in
+  `refCount`; `execPlug()`'s `LC_UndoSection` holds it at 1 for the whole session. A checkpoint
+  is `endUndoCycle()` (1 → 0, the cycle is kept if it has undoables); `undo`/`redo` checkpoint
+  and then call `RS_Undo::undo()/redo()`. The next cycle is opened **lazily**: `startUndoCycle()`
+  discards the redo list (it drops every cycle past `undoPointer`), so opening one right after
+  an undo would make redo impossible. The dispatcher opens it before the first operation that is
+  not in its read-only set. A session that ends with the cycle closed leaves `execPlug()`'s
+  `endUndoCycle()` unmatched; `RS_Undo` handles that with a debug warning and no state change.
+  All virtual via `RS_Document`, so no new symbols. Found the hard way: the first version
+  reopened eagerly and `redo()` returned 0.
+- `file_info`, `file_save`, `file_save_as` — `RS_Document::getFilename()/isModified()` and
+  `RS_Graphic::saveAs(path, type, force=true)` (virtual). `force` matters: `RS_Graphic::save()`
+  writes only when the modified flag is set, and `saveAs` with `force` sets it. The format comes
+  from `RS_FileIO::detectFormat(path, false)` (bound) unless named.
+- `file_open`, `file_new` — handled by `BridgeServer`, not the dispatcher, because they cannot be
+  done inside a session: `Document_Interface` is bound to one `RS_Document` for the life of
+  `execComm()` (risk 7), and loading a file into the *current* document is unsafe anyway —
+  `RS_Graphic::open()` calls `newDoc()`, which deletes every entity while `RS_Undo`'s list still
+  points at them (LibreCAD only does this on a freshly created window). So the server
+  acknowledges, stops with a `SessionRestart` pending, and the plugin, after `execComm()` has
+  returned and `execPlug()` closed its undo section, runs `QC_ApplicationWindow::slotFileOpen()`
+  / `slotFileNewNew()` from a zero-timer and triggers its own menu `QAction` (LibreCAD parents it
+  to the plugin object) to start a new session on the now-active window. The Python client waits
+  for the old socket to disappear and reconnects; entity handles carry a generation number so
+  the old ones go stale. Verified live 2026-10-06.
 
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session

@@ -91,6 +91,10 @@ private:
     // throwing RequestError. Registered in the table built by handlers().
     using Handler = QJsonValue (Dispatcher::*)(const QJsonObject &);
     static const QHash<QString, Handler> &handlers();
+    //! Operations that never change the drawing. Everything else reopens the
+    //! undo cycle first (NativeBridge::ensureUndoCycle), which is what
+    //! discards redo history -- so a query after undo() keeps redo possible.
+    static const QSet<QString> &readOnlyOperations();
 
     // Entity handles. getAllEntities() hands out heap-allocated Plug_Entity
     // wrappers that the caller owns; they are kept here behind small integer
@@ -155,6 +159,12 @@ private:
     QJsonValue opModMirror(const QJsonObject &args);
     QJsonValue opModExplode(const QJsonObject &args);
     QJsonValue opModTrim(const QJsonObject &args);
+    QJsonValue opFileInfo(const QJsonObject &args);
+    QJsonValue opFileSave(const QJsonObject &args);
+    QJsonValue opFileSaveAs(const QJsonObject &args);
+    QJsonValue opUndoCheckpoint(const QJsonObject &args);
+    QJsonValue opUndo(const QJsonObject &args);
+    QJsonValue opRedo(const QJsonObject &args);
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
 

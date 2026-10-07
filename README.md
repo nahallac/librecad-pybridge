@@ -129,6 +129,23 @@ doc.mirror([wall, inner], (2000, 0), (2000, 1), copy=True)
 kept, = doc.trim(wall, trim_point=(10, 0), limit=inner, limit_point=(500, 0))
 ```
 
+Files and undo, through the same access:
+
+```python
+doc.file_info()                         # {"path": "...", "modified": bool}
+doc.save()                              # to its own file; no_filename if unnamed
+doc.save_as("/tmp/plate.dxf")           # DXF 2007 by default; format="dxf2000" etc.
+doc.undo_checkpoint()                   # close the current undo step, start another
+doc.undo(); doc.redo()                  # whole steps, as Ctrl+Z would
+doc.open("/path/to/other.dxf")          # new window, new session, same Document object
+doc.new()
+```
+
+A session is one undo step unless you checkpoint it. `open()` and `new()` are different: a
+session is bound to one drawing (see the architecture note below), so they end the session, have
+LibreCAD open the drawing in a new window and start a fresh session on it, and reconnect. Every
+`Entity` from before is stale afterwards; the `Document` object carries over.
+
 `python/examples/native_demo.py` draws a hatched, dimensioned plate. See `docs/findings.md`,
 "Native access", for how this works and what it depends on.
 
@@ -187,7 +204,11 @@ Conventions, uniform across every operation:
 - `batch` takes a list of requests and returns a list of responses, so bulk geometry is one message
   instead of a round trip per entity.
 
-Run `{"op": "operations"}` for the current list. Deliberately absent: the interactive prompts
+Run `{"op": "operations"}` for the current list. Four operations are handled by the server
+rather than the dispatcher and so are not in it: `session` (a unique id for the running session),
+`shutdown`, `file_open`, and `file_new`. The last three end the session; `file_open` and
+`file_new` also open a drawing (or a new one) and start a new session on it.
+Deliberately absent: the interactive prompts
 (`getPoint`, `getEnt`, `getSelect`, `getSelectByType`, `getInt`, `getReal`, `getString`). Each one
 spins a nested Qt event loop and cancels whatever action the user had in progress, so they need a
 design of their own — see `docs/findings.md` risks 6 and 8. One consequence is worth knowing now:

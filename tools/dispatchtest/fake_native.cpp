@@ -36,6 +36,16 @@ bool NativeBridge::isUndone(Plug_Entity *, bool *) const { return false; }
 bool NativeBridge::offset(const QPointF &, double, int, bool, bool, bool) { return false; }
 bool NativeBridge::mirror(const QPointF &, const QPointF &, bool) { return false; }
 bool NativeBridge::explode(bool) { return false; }
+bool NativeBridge::fileInfo(QString *, bool *) const { return false; }
+bool NativeBridge::saveAs(const QString &, const QString &) { return false; }
+bool NativeBridge::undoCheckpoint() { return false; }
+bool NativeBridge::undo(int, bool, int *) { return false; }
+void NativeBridge::ensureUndoCycle() {}
+bool performSessionRestart(const SessionRestart &, QString *error)
+{
+    *error = QStringLiteral("native layer not built into dispatchtest");
+    return false;
+}
 bool NativeBridge::trim(Plug_Entity *, const QPointF &, Plug_Entity *, const QPointF &, bool) { return false; }
 bool NativeBridge::execCommand(const QString &) { return false; }
 bool NativeBridge::setSelected(Plug_Entity *, bool) { return false; }

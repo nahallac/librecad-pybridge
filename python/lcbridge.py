@@ -32,6 +32,7 @@ __version__ = "0.1.0"
 
 import json
 import os
+import time
 import socket
 from typing import Any, Iterator
 
@@ -72,6 +73,7 @@ class Bridge:
 
     def __init__(self, path: str | None = None, timeout: float | None = 30.0):
         self._path = path or default_socket_path()
+        self._timeout = timeout
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(timeout)
         self._sock.connect(self._path)
@@ -210,6 +212,7 @@ class Entity:
                  data: dict[str, Any] | None):
         self._doc = doc
         self._handle = handle
+        self._generation = doc._generation
         self.type = etype
         self._data = data
         self._stale = False
@@ -231,7 +234,7 @@ class Entity:
     # -- plumbing ------------------------------------------------------------
 
     def _call(self, op: str, **args: Any) -> Any:
-        if self._stale:
+        if self._stale or self._generation != self._doc._generation:
             raise StaleEntityError(
                 f"{self.type} #{self._handle} is stale; re-fetch it with "
                 f"Document.entities()")
@@ -406,6 +409,9 @@ class Document:
     def __init__(self, bridge: Bridge):
         self._bridge = bridge
         self._queue: list[dict[str, Any]] | None = None
+        # Bumped when open()/new() start a fresh session; handles from the
+        # old one are meaningless there, so Entity checks it.
+        self._generation = 0
 
     @classmethod
     def connect(cls, path: str | None = None,
@@ -832,6 +838,108 @@ class Document:
         if box is None:
             return None
         return (tuple(box["min"]), tuple(box["max"]))
+
+    # -- file and undo (need a real LibreCAD session) ---------------------------
+
+    def file_info(self) -> dict[str, Any]:
+        """{"path": str, "modified": bool} for the current drawing."""
+        return self._call_now("file_info")
+
+    def save(self) -> dict[str, Any]:
+        """Write the drawing to its own file. BridgeError("no_filename") for
+        an unnamed drawing; use save_as()."""
+        return self._call_now("file_save")
+
+    def save_as(self, path: str, format: str | None = None) -> dict[str, Any]:
+        """Write the drawing to ``path``, which becomes its file name.
+
+        ``format`` is a DXF version ("dxf2007" default, "dxf2004", "dxf2000",
+        "dxf14", "dxf12", "dxf1") or None to pick by extension.
+        """
+        args: dict[str, Any] = {"path": os.fspath(path)}
+        if format:
+            args["format"] = format
+        return self._call_now("file_save_as", **args)
+
+    def undo_checkpoint(self) -> None:
+        """Close the current undo step and start a new one.
+
+        A session is one undo step by default; call this between stages
+        that should undo separately.
+        """
+        self._flush()
+        self._call_now("undo_checkpoint")
+
+    def undo(self, steps: int = 1) -> int:
+        """Checkpoint, then undo ``steps`` steps; returns how many were."""
+        self._flush()
+        return int(self._call_now("undo", steps=int(steps)))
+
+    def redo(self, steps: int = 1) -> int:
+        self._flush()
+        return int(self._call_now("redo", steps=int(steps)))
+
+    def open(self, path: str, timeout: float = 60.0) -> dict[str, Any]:
+        """Open ``path`` in a new LibreCAD window and continue there.
+
+        A bridge session is bound to one drawing, so this ends the current
+        session, has LibreCAD open the file and start a new session on it,
+        and reconnects to that. Every Entity from before is stale afterwards.
+        Returns file_info() of the new drawing; raises BridgeError if the
+        drawing LibreCAD ended up on is not ``path`` (it could not be read,
+        for example -- LibreCAD shows its own message then).
+        """
+        path = os.path.abspath(os.fspath(path))
+        self._restart_session("file_open", timeout, path=path)
+        info = self.file_info()
+        if info.get("path") != path:
+            raise BridgeError("open_failed",
+                              f"LibreCAD did not open {path!r}; the session is "
+                              f"on {info.get('path')!r}")
+        return info
+
+    def new(self, timeout: float = 30.0) -> dict[str, Any]:
+        """Start a new, unnamed drawing in a new window and continue there.
+        Same session mechanics as open()."""
+        self._restart_session("file_new", timeout)
+        return self.file_info()
+
+    def session_id(self) -> str:
+        """Unique id of the bridge session this Document is connected to."""
+        return str(self._bridge.request("session")["id"])
+
+    def _restart_session(self, op: str, timeout: float, **args: Any) -> None:
+        self._flush()
+        old_id = self.session_id()
+        self._call_now(op, **args)         # acknowledged, then the session ends
+        socket_path = self._bridge._path
+        bridge_timeout = self._bridge._timeout
+        self._bridge.close()
+        self._generation += 1
+        deadline = time.monotonic() + timeout
+        # The new session listens on the same path, often within milliseconds,
+        # so the socket's absence cannot be relied on; connect and ask instead
+        # until a session with a different id answers.
+        while True:
+            try:
+                probe = Bridge(socket_path, timeout=2.0)
+            except OSError:
+                probe = None
+            if probe is not None:
+                try:
+                    if probe.request("session")["id"] != old_id:
+                        probe._sock.settimeout(bridge_timeout)
+                        self._bridge = probe
+                        return
+                except (OSError, BridgeError, ProtocolError):
+                    pass
+                probe.close()
+            if time.monotonic() > deadline:
+                raise BridgeError(
+                    "restart_timeout",
+                    "no new bridge session appeared (did LibreCAD show a "
+                    "dialog?)")
+            time.sleep(0.1)
 
     # -- engine modifications (the modify tools, via RS_Modification) ---------
     #

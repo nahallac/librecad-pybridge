@@ -171,7 +171,14 @@ def main() -> int:
                          lambda: doc.offset([probe], 5, (0, 0)),
                          lambda: doc.mirror([probe], (0, 0), (1, 0)),
                          lambda: doc.explode([probe]),
-                         lambda: doc.trim(probe, (0, 0), probe, (1, 1))):
+                         lambda: doc.trim(probe, (0, 0), probe, (1, 1)),
+                         lambda: doc.file_info(),
+                         lambda: doc.save(),
+                         lambda: doc.save_as("/tmp/never-written.dxf"),
+                         lambda: doc.undo_checkpoint(),
+                         lambda: doc.undo(),
+                         lambda: doc.open("/nonexistent.dxf"),
+                         lambda: doc.new()):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

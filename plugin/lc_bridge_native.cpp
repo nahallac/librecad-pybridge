@@ -21,11 +21,15 @@
 #include "rs_document.h"            // RS_Document is the RS_EntityContainer
 #include "rs_modification.h"        // RS_Modification: the modify tools
 #include "qc_applicationwindow.h"   // QC_ApplicationWindow::getAppWindow
+#include "qc_mdiwindow.h"           // window title after save
+#include "rs_fileio.h"              // RS_FileIO::detectFormat
 #include "qg_commandwidget.h"       // QG_CommandWidget::handleCommand
 #include "qg_dlghatch.h"            // QG_DlgHatch and its Ui members
 
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QFileInfo>
 #include <QCoreApplication>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -69,6 +73,29 @@ bool isInstanceOf(const QObject *object, const char *className)
     return false;
 }
 
+bool versionMatches()
+{
+    return QCoreApplication::applicationVersion()
+           == QStringLiteral(LC_PYBRIDGE_LIBRECAD_VERSION);
+}
+
+bool formatFromName(const QString &name, RS2::FormatType *type)
+{
+    static const struct { const char *name; RS2::FormatType type; } table[] = {
+        {"dxf2007", RS2::FormatDXFRW},  {"dxf2004", RS2::FormatDXFRW2004},
+        {"dxf2000", RS2::FormatDXFRW2000}, {"dxf14", RS2::FormatDXFRW14},
+        {"dxf12", RS2::FormatDXFRW12},  {"dxf1", RS2::FormatDXF1},
+        {"lff", RS2::FormatLFF},        {"cxf", RS2::FormatCXF},
+    };
+    for (const auto &entry : table) {
+        if (name.compare(QLatin1String(entry.name), Qt::CaseInsensitive) == 0) {
+            *type = entry.type;
+            return true;
+        }
+    }
+    return false;
+}
+
 RS_Vector toVector(const QPointF &point)
 {
     // The (x, y, z) constructor is an exported symbol, but the default one
@@ -82,6 +109,34 @@ RS_Vector toVector(const QPointF &point)
 }
 
 } // namespace
+
+bool performSessionRestart(const SessionRestart &restart, QString *error)
+{
+    if (!versionMatches()) {
+        *error = QStringLiteral("LibreCAD version mismatch");
+        return false;
+    }
+    QC_ApplicationWindow *app = QC_ApplicationWindow::getAppWindow().get();
+    if (!app) {
+        *error = QStringLiteral("no application window");
+        return false;
+    }
+    switch (restart.kind) {
+    case SessionRestart::OpenFile:
+        // The same path File > Open takes: a new MDI window, the file loaded
+        // into it, the window activated, recent files updated. Failure
+        // closes the window again and shows LibreCAD's own message.
+        app->slotFileOpen(restart.path, RS2::FormatUnknown);
+        return true;
+    case SessionRestart::NewDrawing:
+        app->slotFileNewNew();
+        return true;
+    case SessionRestart::None:
+        break;
+    }
+    *error = QStringLiteral("nothing to do");
+    return false;
+}
 
 QString NativeBridge::builtAgainst()
 {
@@ -311,6 +366,85 @@ bool NativeBridge::trim(Plug_Entity *trimEntity, const QPointF &trimPoint,
         return false;
     }
     return true;
+}
+
+bool NativeBridge::fileInfo(QString *path, bool *modified) const
+{
+    if (!modificationAvailable())
+        return false;
+    *path = m_document->getFilename();      // inline accessor
+    *modified = m_document->isModified();   // virtual
+    return true;
+}
+
+bool NativeBridge::saveAs(const QString &path, const QString &format)
+{
+    if (!modificationAvailable())
+        return false;
+    RS2::FormatType type = RS2::FormatUnknown;
+    if (format.isEmpty()) {
+        type = RS_FileIO::detectFormat(path, false);   // bound symbol
+        if (type == RS2::FormatUnknown) {
+            m_lastError = QStringLiteral("cannot tell the format from the "
+                                         "extension of \"%1\"; pass \"format\"")
+                              .arg(path);
+            return false;
+        }
+    } else if (!formatFromName(format, &type)) {
+        m_lastError = QStringLiteral("unknown format \"%1\"").arg(format);
+        return false;
+    }
+    // force: write even when nothing is flagged modified, and (re)adopt the
+    // name. RS_Graphic::saveAs restores the old name if the write fails.
+    if (!m_document->saveAs(path, type, true)) {
+        m_lastError = QStringLiteral("LibreCAD could not write \"%1\"").arg(path);
+        return false;
+    }
+    // What File > Save does afterwards, minus the recent-files menu (its
+    // caption helper is private; the file name is what it shows anyway).
+    if (QC_ApplicationWindow *app = QC_ApplicationWindow::getAppWindow().get()) {
+        if (QC_MDIWindow *window = app->getMDIWindow()) {
+            window->setWindowTitle(QFileInfo(path).fileName()
+                                   + QStringLiteral("[*]"));
+            window->setWindowModified(false);
+        }
+    }
+    return true;
+}
+
+bool NativeBridge::undoCheckpoint()
+{
+    if (!modificationAvailable())
+        return false;
+    // Virtual (RS_Undo via RS_Document): refCount 1 -> 0, the cycle is kept
+    // if it has undoables. ensureUndoCycle() opens the next one on demand.
+    if (m_undoCycleOpen) {
+        m_document->endUndoCycle();
+        m_undoCycleOpen = false;
+    }
+    return true;
+}
+
+bool NativeBridge::undo(int steps, bool redo, int *done)
+{
+    if (!modificationAvailable())
+        return false;
+    undoCheckpoint();
+    *done = 0;
+    for (int i = 0; i < steps; ++i) {
+        if (!(redo ? m_document->redo() : m_document->undo()))
+            break;
+        ++*done;
+    }
+    return true;
+}
+
+void NativeBridge::ensureUndoCycle()
+{
+    if (!modificationAvailable() || m_undoCycleOpen)
+        return;
+    m_document->startUndoCycle();   // discards the redo list, like any action
+    m_undoCycleOpen = true;
 }
 
 void NativeBridge::armHatchDialog(const QString &pattern, double scaleFactor,

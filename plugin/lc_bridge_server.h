@@ -17,6 +17,8 @@
 #define LC_BRIDGE_SERVER_H
 
 #include <QByteArray>
+
+#include "lc_bridge_native.h"
 #include <QObject>
 #include <QString>
 
@@ -35,8 +37,18 @@ class NativeBridge;
  * terminated. Requests and responses are exactly what Dispatcher::dispatch()
  * takes and returns, plus one server-level operation:
  *
+ *   {"op": "session"}   ->  {"ok": true, "result": {"id": <unique per
+ *                           session>, "requests": n}}. Clients use the id to
+ *                           tell a new session from the one they left.
  *   {"op": "shutdown"}  ->  {"ok": true, "result": null}, then the server
  *                           stops and serve() returns.
+ *   {"op": "file_open", "args": {"path": ...}} and {"op": "file_new"}
+ *                       ->  {"ok": true, "result": {"path": ...}}, then the
+ *                           server stops with pendingRestart() set, for the
+ *                           plugin to open the drawing and start a new
+ *                           session on it. Session-level because the
+ *                           Document_Interface cannot follow a change of
+ *                           document (findings risk 7).
  *
  * One client at a time; a second connection is sent an error line and closed.
  * A client disconnect does not stop the server -- the session ends on
@@ -69,6 +81,9 @@ public:
     QString errorString() const { return m_error; }
     QString fullServerName() const;
     int requestsHandled() const { return m_requestsHandled; }
+    //! Set when the session ended on file_open or file_new.
+    SessionRestart pendingRestart() const { return m_pendingRestart; }
+    QString sessionId() const { return m_sessionId; }
 
 public slots:
     //! End serve() from outside, e.g. a Stop button.
@@ -88,8 +103,13 @@ private:
     void processLine(const QByteArray &line);
     void sendToClient(const QByteArray &line);
 
+    QJsonObject sessionRequest(const QJsonObject &request, bool *stopAfter);
+
     Document_Interface *m_doc {nullptr};
+    NativeBridge *m_native {nullptr};
     Dispatcher *m_dispatcher {nullptr};
+    SessionRestart m_pendingRestart;
+    QString m_sessionId;
     QLocalServer *m_server {nullptr};
     QLocalSocket *m_client {nullptr};
     QByteArray m_buffer;

@@ -54,6 +54,7 @@ INCLUDEPATH += \
     $$LIBRECAD_SRC_LIB/lib/math \
     $$LIBRECAD_SRC_LIB/lib/gui \
     $$LIBRECAD_SRC_LIB/lib/fileio \
+    $$LIBRECAD_SRC_LIB/lib/filters \
     $$LIBRECAD_SRC_LIB/lib/actions \
     $$LIBRECAD_SRC_LIB/lib/information \
     $$LIBRECAD_SRC_LIB/lib/modification \

@@ -18,6 +18,8 @@
 #include <QPushButton>
 #include <QString>
 
+#include <QAction>
+#include <QTimer>
 #include <functional>
 #include <utility>
 
@@ -142,7 +144,36 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
     parent->removeEventFilter(&repinFilter);
     overlay.hide();
     doc->updateView();
-    QMessageBox::information(parent, tr(kPluginTitle),
-                             tr("Bridge session ended after %1 requests.")
-                                 .arg(handled));
+
+    const lcbridge::SessionRestart restart = server.pendingRestart();
+    if (restart.kind == lcbridge::SessionRestart::None) {
+        QMessageBox::information(parent, tr(kPluginTitle),
+                                 tr("Bridge session ended after %1 requests.")
+                                     .arg(handled));
+        return;
+    }
+
+    // The session ended on file_open/file_new. Once execComm() has returned
+    // and execPlug() has closed its undo section, open the drawing and start
+    // a new session on it by triggering this plugin's own menu action --
+    // LibreCAD parents that QAction to the plugin, so it is a child here.
+    QTimer::singleShot(0, this, [this, parent, restart]() {
+        QString error;
+        if (!lcbridge::performSessionRestart(restart, &error)) {
+            QMessageBox::warning(parent, tr(kPluginTitle),
+                                 tr("Could not restart the bridge session:\n%1")
+                                     .arg(error));
+            return;
+        }
+        const QList<QAction *> actions = findChildren<QAction *>();
+        for (QAction *action : actions) {
+            if (action->isEnabled()) {
+                action->trigger();
+                return;
+            }
+        }
+        QMessageBox::warning(parent, tr(kPluginTitle),
+                             tr("Drawing opened, but the bridge menu action "
+                                "was not found; start the bridge by hand."));
+    });
 }

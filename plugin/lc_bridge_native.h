@@ -45,6 +45,22 @@ class RS_GraphicView;
 
 namespace lcbridge {
 
+//! What a session asked to happen after it ends: open a drawing in a new
+//! window, or make a new drawing, and then start a fresh session on it.
+//! Document_Interface is bound to one document for the life of execComm()
+//! (findings risk 7), so a different drawing means a different session.
+struct SessionRestart
+{
+    enum Kind { None, OpenFile, NewDrawing };
+    Kind kind {None};
+    QString path;
+};
+
+//! Carry out \a restart against the application window. Returns false (with
+//! \a error set) when the version check fails or LibreCAD refused. Static
+//! because it runs after the session's NativeBridge is gone.
+bool performSessionRestart(const SessionRestart &restart, QString *error);
+
 class NativeBridge : public QObject
 {
     Q_OBJECT
@@ -115,6 +131,29 @@ public:
               Plug_Entity *limitEntity, const QPointF &limitPoint, bool both);
     QString lastError() const { return m_lastError; }
 
+    // Document file state. The session's undo cycle stays open throughout;
+    // saving does not touch it.
+    //! Current file name (empty for an unnamed drawing) and modified flag.
+    bool fileInfo(QString *path, bool *modified) const;
+    //! Write the drawing to \a path. \a format names a DXF version
+    //! ("dxf2007", "dxf2004", "dxf2000", "dxf14", "dxf12", "dxf1") or is
+    //! empty to pick by extension. The document's file name becomes \a path.
+    bool saveAs(const QString &path, const QString &format);
+
+    // Undo cycles. execPlug() opens one cycle around the whole session.
+    // RS_Undo::startUndoCycle() discards the redo list, so the cycle is
+    // reopened lazily: undoCheckpoint()/undo() close it, and the dispatcher
+    // calls ensureUndoCycle() before the next operation that changes the
+    // drawing. A session that ends with the cycle closed leaves execPlug()'s
+    // endUndoCycle() unmatched, which RS_Undo handles (a debug warning).
+    //! Close the current undo step; the next change starts a new one.
+    bool undoCheckpoint();
+    //! Close the current step, then undo (or redo) up to \a steps cycles;
+    //! the number actually undone is returned through \a done.
+    bool undo(int steps, bool redo, int *done);
+    //! Open a cycle if none is open. Call before anything undoable.
+    void ensureUndoCycle();
+
     //! Start watching for the hatch dialog. When it appears, fill it in and
     //! accept it. armed() stays true until the dialog was handled or
     //! \a timeoutMs passed. \a angleDegrees because the dialog field is in
@@ -131,6 +170,7 @@ private:
     QG_CommandWidget *m_commandWidget {nullptr};
     RS_Document *m_document {nullptr};
     RS_GraphicView *m_graphicView {nullptr};
+    bool m_undoCycleOpen {true};   // execPlug() opened it before execComm()
     QString m_reason;
     QString m_lastError;
 

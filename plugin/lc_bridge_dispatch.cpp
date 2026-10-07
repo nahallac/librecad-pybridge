@@ -573,8 +573,34 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("mod_mirror"),           &Dispatcher::opModMirror},
         {QStringLiteral("mod_explode"),          &Dispatcher::opModExplode},
         {QStringLiteral("mod_trim"),             &Dispatcher::opModTrim},
+        {QStringLiteral("file_info"),            &Dispatcher::opFileInfo},
+        {QStringLiteral("file_save"),            &Dispatcher::opFileSave},
+        {QStringLiteral("file_save_as"),         &Dispatcher::opFileSaveAs},
+        {QStringLiteral("undo_checkpoint"),      &Dispatcher::opUndoCheckpoint},
+        {QStringLiteral("undo"),                 &Dispatcher::opUndo},
+        {QStringLiteral("redo"),                 &Dispatcher::opRedo},
         {QStringLiteral("cmd_dim"),              &Dispatcher::opCmdDim},
         {QStringLiteral("cmd_hatch"),            &Dispatcher::opCmdHatch},
+    };
+    return table;
+}
+
+const QSet<QString> &Dispatcher::readOnlyOperations()
+{
+    static const QSet<QString> table{
+        QStringLiteral("ping"),            QStringLiteral("operations"),
+        QStringLiteral("batch"),           QStringLiteral("update_view"),
+        QStringLiteral("get_current_layer"), QStringLiteral("get_layers"),
+        QStringLiteral("get_layer_properties"), QStringLiteral("get_blocks"),
+        QStringLiteral("get_entities"),    QStringLiteral("release_handles"),
+        QStringLiteral("unselect"),        QStringLiteral("entity_data"),
+        QStringLiteral("entity_polyline"), QStringLiteral("get_variable"),
+        QStringLiteral("real_to_string"),  QStringLiteral("native_status"),
+        QStringLiteral("select_entities"), QStringLiteral("entity_selected"),
+        QStringLiteral("entity_bbox"),     QStringLiteral("get_bbox"),
+        QStringLiteral("file_info"),       QStringLiteral("file_save"),
+        QStringLiteral("file_save_as"),    QStringLiteral("undo_checkpoint"),
+        QStringLiteral("undo"),            QStringLiteral("redo"),
     };
     return table;
 }
@@ -627,6 +653,8 @@ QJsonObject Dispatcher::dispatch(const QJsonObject &request)
     }
 
     try {
+        if (m_native && !readOnlyOperations().contains(op))
+            m_native->ensureUndoCycle();
         const Handler function = *handler;
         const QJsonValue result = (this->*function)(args);
         response.insert(QStringLiteral("ok"), true);
@@ -1571,6 +1599,81 @@ QJsonValue Dispatcher::opModTrim(const QJsonObject &args)
         replaced.append(args.value(QStringLiteral("limit_handle")));
     invalidateHandles(replaced);
     return newEntitiesSince(before);
+}
+
+// Document file state and undo cycles. file_open and file_new are not here:
+// they end the session (see BridgeServer).
+
+QJsonValue Dispatcher::opFileInfo(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireModification();
+    QString path;
+    bool modified = false;
+    m_native->fileInfo(&path, &modified);
+    QJsonObject result;
+    result.insert(QStringLiteral("path"), path);
+    result.insert(QStringLiteral("modified"), modified);
+    return result;
+}
+
+QJsonValue Dispatcher::opFileSave(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireModification();
+    QString path;
+    bool modified = false;
+    m_native->fileInfo(&path, &modified);
+    if (path.isEmpty()) {
+        throw RequestError(QStringLiteral("no_filename"),
+                           QStringLiteral("the drawing has no file name yet; "
+                                          "use file_save_as"));
+    }
+    if (!m_native->saveAs(path, QString()))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return opFileInfo(args);
+}
+
+QJsonValue Dispatcher::opFileSaveAs(const QJsonObject &args)
+{
+    requireModification();
+    const QString path = requireString(args, QStringLiteral("path"));
+    const QString format = optionalString(args, QStringLiteral("format"), QString());
+    if (!m_native->saveAs(path, format))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return opFileInfo(args);
+}
+
+QJsonValue Dispatcher::opUndoCheckpoint(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireModification();
+    m_native->undoCheckpoint();
+    return QJsonValue();
+}
+
+QJsonValue Dispatcher::opUndo(const QJsonObject &args)
+{
+    requireModification();
+    const int steps = static_cast<int>(optionalNumber(args, QStringLiteral("steps"), 1));
+    if (steps < 1)
+        badArgs(QStringLiteral("\"steps\" must be at least 1"));
+    int done = 0;
+    m_native->undo(steps, false, &done);
+    m_doc->updateView();
+    return done;
+}
+
+QJsonValue Dispatcher::opRedo(const QJsonObject &args)
+{
+    requireModification();
+    const int steps = static_cast<int>(optionalNumber(args, QStringLiteral("steps"), 1));
+    if (steps < 1)
+        badArgs(QStringLiteral("\"steps\" must be at least 1"));
+    int done = 0;
+    m_native->undo(steps, true, &done);
+    m_doc->updateView();
+    return done;
 }
 
 QJsonValue Dispatcher::opCmdDim(const QJsonObject &args)

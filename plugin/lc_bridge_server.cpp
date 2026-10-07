@@ -9,6 +9,8 @@
 #include "lc_bridge_dispatch.h"
 
 #include <QEventLoop>
+#include <QFileInfo>
+#include <QUuid>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -44,8 +46,10 @@ BridgeServer::BridgeServer(Document_Interface *doc, NativeBridge *native,
                            QObject *parent)
     : QObject(parent)
     , m_doc(doc)
+    , m_native(native)
     , m_dispatcher(new Dispatcher(doc, native))
     , m_server(new QLocalServer(this))
+    , m_sessionId(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
     // The socket lives in a user-owned directory, but enforce user-only access
     // on the socket itself as well: this is an open door into the drawing.
@@ -184,16 +188,12 @@ void BridgeServer::processLine(const QByteArray &line)
                                  QStringLiteral("request must be a JSON object"));
     } else {
         const QJsonObject request = document.object();
-        if (request.value(QStringLiteral("op")).toString()
-                == QLatin1String("shutdown")) {
-            // Server-level: acknowledged before the loop is told to quit, so
+        const QString op = request.value(QStringLiteral("op")).toString();
+        if (op == QLatin1String("shutdown") || op == QLatin1String("session")
+            || op == QLatin1String("file_open") || op == QLatin1String("file_new")) {
+            // Session-level: acknowledged before the loop is told to quit, so
             // the client sees the reply.
-            response.insert(QStringLiteral("ok"), true);
-            response.insert(QStringLiteral("result"), QJsonValue());
-            if (request.contains(QStringLiteral("id")))
-                response.insert(QStringLiteral("id"),
-                                request.value(QStringLiteral("id")));
-            shutdown = true;
+            response = sessionRequest(request, &shutdown);
         } else {
             response = m_dispatcher->dispatch(request);
         }
@@ -205,6 +205,60 @@ void BridgeServer::processLine(const QByteArray &line)
 
     if (shutdown)
         stop();
+}
+
+QJsonObject BridgeServer::sessionRequest(const QJsonObject &request, bool *stopAfter)
+{
+    const QString op = request.value(QStringLiteral("op")).toString();
+    const QJsonObject args = request.value(QStringLiteral("args")).toObject();
+    QJsonObject response;
+    QJsonValue result;
+
+    if (op == QLatin1String("session")) {
+        QJsonObject out;
+        out.insert(QStringLiteral("id"), m_sessionId);
+        out.insert(QStringLiteral("requests"), m_requestsHandled);
+        result = out;
+    } else if (op == QLatin1String("shutdown")) {
+        *stopAfter = true;
+    } else if (!m_native || !m_native->modificationAvailable()) {
+        response = errorResponse(
+            QStringLiteral("unavailable"),
+            m_native ? QStringLiteral("native access unavailable: %1")
+                           .arg(m_native->reason())
+                     : QStringLiteral("no native bridge in this server "
+                                      "(offline stub?)"));
+    } else if (op == QLatin1String("file_open")) {
+        const QJsonValue pathValue = args.value(QStringLiteral("path"));
+        const QFileInfo info(pathValue.toString());
+        if (!pathValue.isString() || pathValue.toString().isEmpty()) {
+            response = errorResponse(QStringLiteral("bad_args"),
+                                     QStringLiteral("\"path\" must be a string"));
+        } else if (!info.isFile() || !info.isReadable()) {
+            response = errorResponse(QStringLiteral("not_found"),
+                                     QStringLiteral("\"%1\" is not a readable file")
+                                         .arg(info.filePath()));
+        } else {
+            m_pendingRestart.kind = SessionRestart::OpenFile;
+            m_pendingRestart.path = info.absoluteFilePath();
+            QJsonObject out;
+            out.insert(QStringLiteral("path"), m_pendingRestart.path);
+            result = out;
+            *stopAfter = true;
+        }
+    } else {   // file_new
+        m_pendingRestart.kind = SessionRestart::NewDrawing;
+        m_pendingRestart.path.clear();
+        *stopAfter = true;
+    }
+
+    if (response.isEmpty()) {
+        response.insert(QStringLiteral("ok"), true);
+        response.insert(QStringLiteral("result"), result);
+    }
+    if (request.contains(QStringLiteral("id")))
+        response.insert(QStringLiteral("id"), request.value(QStringLiteral("id")));
+    return response;
 }
 
 void BridgeServer::sendToClient(const QByteArray &line)
