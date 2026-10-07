@@ -338,6 +338,82 @@ class Entity:
         self._call("entity_remove")
         self._stale = True
 
+    # -- geometry queries (native: need a real LibreCAD session) ---------------
+
+    #: Set by Document.nearest_entity(): how far the query point was.
+    distance: float | None = None
+
+    def _require_live(self) -> None:
+        if self._stale or self._generation != self._doc._generation:
+            raise StaleEntityError(
+                f"{self.type} #{self._handle} is stale; re-fetch it with "
+                f"Document.entities()")
+
+    @property
+    def id(self) -> int:
+        """LibreCAD's own id for the entity (RS_Entity::getId()).
+
+        Unlike a handle, which only means something to this session, the id
+        belongs to the engine entity: it is the same across get_entities
+        calls and ``Document.find_entity(id)`` finds the entity again. It is
+        not stored in the file -- ids are assigned when an entity is created
+        or loaded, so they change when the drawing is reopened -- and an
+        entity LibreCAD replaces is a new entity with a new id: that is what
+        ``move()``, ``rotate()``, ``scale()`` and ``update()`` do (the handle
+        survives the first three, the id does not), as do trim and offset
+        without ``keep_original``. Cached from the row when present, else
+        asked for (it is also in ``data["id"]``).
+        """
+        if self._data is not None and "id" in self._data:
+            return int(self._data["id"])
+        return int(self._call("entity_id")["id"])
+
+    def length(self) -> float | None:
+        """Length of the entity (perimeter for a closed polyline or circle),
+        or None for entities without one (text, hatch, image)."""
+        return self._call("entity_length")["length"]
+
+    def area(self) -> float:
+        """Enclosed area of a circle, a full ellipse, or a closed polyline;
+        0.0 for anything that encloses nothing (lines, arcs, open
+        polylines, ...). Positive whatever the winding. Curved polyline
+        segments (bulges) are included."""
+        return float(self._call("entity_area")["area"])
+
+    def intersections(self, other: "Entity",
+                      on_entities: bool = True) -> list[tuple[float, float]]:
+        """Points where this entity crosses ``other``.
+
+        With ``on_entities`` (default) only points that lie on both entities
+        as drawn; with False, where their infinite extensions meet (lines
+        extended, arcs completed to full circles).
+        """
+        self._require_live()
+        other._require_live()
+        points = self._doc._call_now("intersections", a=self._handle,
+                                     b=other._handle, on_entities=on_entities)
+        return [(p[0], p[1]) for p in points]
+
+    def nearest_point(self, point: Any, on_entity: bool = True
+                      ) -> tuple[tuple[float, float], float] | None:
+        """The point of this entity closest to ``point``: ((x, y), distance).
+
+        ``on_entity`` False allows the point to lie on the infinite
+        extension (a line beyond its ends, an arc's full circle). None when
+        the entity has no such point.
+        """
+        result = self._call("nearest_point", point=_pt(point),
+                            on_entity=on_entity)
+        if result is None:
+            return None
+        return (tuple(result["point"]), result["distance"])
+
+    def contains(self, point: Any) -> bool:
+        """Whether ``point`` is inside this closed polyline, circle, or full
+        ellipse. BridgeError("bad_request") for an open polyline or any
+        other entity. A point exactly on the boundary may go either way."""
+        return bool(self._call("point_inside", point=_pt(point)))
+
 
 class _LayerSwitch:
     def __init__(self, doc: "Document", name: str):
@@ -1105,3 +1181,118 @@ class Document:
                        handles=[entity._handle for entity in entities],
                        pattern=pattern, scale=float(scale),
                        angle=float(angle), solid=solid)
+
+
+    # -- layer state (native) -----------------------------------------------------
+
+    def layer_state(self, name: str) -> dict[str, bool]:
+        """{"frozen", "locked", "print", "construction", "visible"} of layer
+        ``name`` ("visible" is just "not frozen"). BridgeError("not_found")
+        for an unknown layer."""
+        return self._call_now("get_layer_state", name=name)
+
+    def layer_states(self) -> list[dict[str, Any]]:
+        """Every layer with its state, in one call: dicts as layer_state()
+        returns, plus "name"."""
+        return self._call_now("get_layer_states")
+
+    def set_layer_state(self, name: str, **flags: bool) -> dict[str, bool]:
+        """Freeze, lock, or otherwise flag a layer: any of ``frozen=``,
+        ``locked=``, ``print=``, ``construction=``; omitted ones are kept.
+        Goes through the layer list the layer widget uses, so the view and
+        the layer panel follow. Not undoable. Returns the new state.
+        """
+        unknown = set(flags) - {"frozen", "locked", "print", "construction"}
+        if unknown:
+            raise TypeError(f"unknown layer flag(s): {sorted(unknown)}")
+        return self._call_now("set_layer_state", name=name,
+                              **{k: bool(v) for k, v in flags.items()})
+
+    def rename_layer(self, old: str, new: str) -> dict[str, Any]:
+        """Rename layer ``old`` to ``new``, in place: its entities stay on it
+        (they point at the layer, not at its name). BridgeError("bad_request")
+        if ``new`` is empty or taken, or ``old`` is layer "0". Not undoable.
+        Returns the renamed layer's state, with its "name"."""
+        return self._call_now("rename_layer", old=old, new=new)
+
+    # -- blocks (native) ------------------------------------------------------------
+
+    def define_block(self, name: str, base_point: Any, entities: list["Entity"],
+                     remove: bool = True, insert: bool = False
+                     ) -> "str | tuple[str, Entity]":
+        """Create block ``name`` from ``entities`` -- what Create Block does.
+
+        The entities are copied into the new block with ``base_point`` as
+        its origin. ``remove`` (default) takes the originals out of the
+        drawing (undoably; they become stale here); ``insert`` also places
+        one INSERT of the block at ``base_point``, so the geometry reappears
+        where it was. The block definition itself is not undoable.
+        Returns the block name, or ``(name, insert_entity)`` with
+        ``insert=True``. BridgeError("bad_request") when the name is empty
+        or already used.
+        """
+        result = self._call_now(
+            "block_define", name=name, base_point=_pt(base_point),
+            handles=[e._handle for e in entities], remove=remove,
+            insert=insert)
+        if remove:
+            self._retire(entities)
+        if insert:
+            row = result["insert"]
+            return (result["name"],
+                    Entity(self, row["handle"], row["type"], row.get("data")))
+        return result["name"]
+
+    def rename_block(self, old: str, new: str) -> str:
+        """Rename a block and every INSERT that refers to it (in the drawing
+        and in other blocks); the INSERT entities keep their handles. Not
+        undoable. BridgeError("bad_request") if ``new`` is empty or taken."""
+        return self._call_now("block_rename", old=old, new=new)
+
+    def remove_block(self, name: str) -> None:
+        """Remove a block definition. Refused (BridgeError("bad_request")) while
+        any INSERT -- in the drawing or in another block -- still refers to
+        it; remove those first. Undoable, like the Remove Block tool."""
+        self._call_now("block_remove", name=name)
+
+    def block_entities(self, name: str) -> list[Entity]:
+        """The entities inside block ``name``, in block coordinates (the base
+        point already subtracted). The handles are for reading
+        (``data``, ``length()``, ``bbox()``, ...); do not move, update, or
+        remove them, and ``release()`` them before removing the block."""
+        rows = self._call_now("block_entities", name=name)
+        return self._rows(rows)
+
+    # -- queries (native) -------------------------------------------------------------
+
+    def nearest_entity(self, point: Any, types: list[str] | None = None,
+                       max_distance: float | None = None) -> Entity | None:
+        """The visible entity closest to ``point``, or None.
+
+        ``types`` restricts the search to those type names, ``max_distance``
+        ignores anything farther away. The distance is on the result as
+        ``entity.distance``. Frozen layers and undone entities are skipped;
+        locked layers are not.
+        """
+        args: dict[str, Any] = {"point": _pt(point)}
+        if types:
+            args["types"] = [t.upper() for t in types]
+        if max_distance is not None:
+            args["max_distance"] = float(max_distance)
+        row = self._call_now("nearest_entity", **args)
+        if row is None:
+            return None
+        entity = Entity(self, row["handle"], row["type"], row.get("data"))
+        entity.distance = row["distance"]
+        return entity
+
+    def find_entity(self, id: int) -> Entity | None:
+        """The entity with LibreCAD id ``id`` (see Entity.id) with a fresh
+        handle, or None when no such entity is in the drawing."""
+        try:
+            row = self._call_now("find_entity", id=int(id))
+        except BridgeError as error:
+            if error.code == "not_found":
+                return None
+            raise
+        return Entity(self, row["handle"], row["type"], row.get("data"))

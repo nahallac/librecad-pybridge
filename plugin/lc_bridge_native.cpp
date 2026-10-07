@@ -25,6 +25,17 @@
 #include "rs_fileio.h"              // RS_FileIO::detectFormat
 #include "qg_commandwidget.h"       // QG_CommandWidget::handleCommand
 #include "qg_dlghatch.h"            // QG_DlgHatch and its Ui members
+#include "rs_layer.h"               // layer state, rename
+#include "rs_layerlist.h"
+#include "rs_block.h"               // block definition and removal
+#include "rs_blocklist.h"
+#include "rs_creation.h"            // RS_Creation::createBlock
+#include "rs_graphic.h"
+#include "rs_insert.h"
+#include "rs_information.h"         // intersections, point-in-contour
+#include "rs_circle.h"
+#include "rs_ellipse.h"
+#include "rs_polyline.h"
 
 #include <QAction>
 #include <QApplication>
@@ -35,6 +46,8 @@
 #include <QMetaObject>
 #include <QTimer>
 #include <QWidget>
+
+#include <cmath>
 
 #ifndef LC_PYBRIDGE_LIBRECAD_VERSION
 #error "LC_PYBRIDGE_LIBRECAD_VERSION must be defined (lc_pybridge.pro sets it)"
@@ -503,6 +516,483 @@ void NativeBridge::pollForHatchDialog()
         QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
         return;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Layer state, block definition, geometry queries
+// ---------------------------------------------------------------------------
+
+bool NativeBridge::layerState(const QString &name, LayerState *state) const
+{
+    if (!modificationAvailable())
+        return false;
+    // getLayerList() is virtual on RS_Document: the graphic's list, also when
+    // the active window is a block being edited.
+    RS_LayerList *layers = m_document->getLayerList();
+    RS_Layer *layer = layers ? layers->find(name) : nullptr;
+    if (!layer)
+        return false;
+    state->frozen = layer->isFrozen();
+    state->locked = layer->isLocked();
+    state->print = layer->isPrint();
+    state->construction = layer->isConstruction();
+    return true;
+}
+
+NativeBridge::Result NativeBridge::setLayerState(const QString &name,
+                                                 const LayerStatePatch &patch)
+{
+    if (!modificationAvailable())
+        return Result::Failed;
+    RS_LayerList *layers = m_document->getLayerList();
+    RS_Layer *layer = layers ? layers->find(name) : nullptr;
+    if (!layer) {
+        m_lastError = QStringLiteral("no layer \"%1\"").arg(name);
+        return Result::NotFound;
+    }
+
+    // The same calls the layer widget's checkboxes end in. Each takes the
+    // layers to switch one way and the layers to switch the other way, sets
+    // the flags, and fires layerToggled on every listener (which redraws the
+    // view and refreshes the layer list). The layer goes in exactly one of
+    // the two lists per call.
+    const QList<RS_Layer *> one{layer};
+    const QList<RS_Layer *> none;
+    if (patch.frozen) {
+        if (*patch.frozen)
+            layers->setFreezeMulti(none, one);
+        else
+            layers->setFreezeMulti(one, none);
+    }
+    if (patch.locked) {
+        if (*patch.locked)
+            layers->setLockMulti(none, one);
+        else
+            layers->setLockMulti(one, none);
+    }
+    if (patch.print) {
+        if (*patch.print)
+            layers->setPrintMulti(none, one);
+        else
+            layers->setPrintMulti(one, none);
+    }
+    if (patch.construction) {
+        if (*patch.construction)
+            layers->setConstructionMulti(none, one);
+        else
+            layers->setConstructionMulti(one, none);
+    }
+    return Result::Done;
+}
+
+NativeBridge::Result NativeBridge::renameLayer(const QString &oldName,
+                                               const QString &newName)
+{
+    if (!modificationAvailable())
+        return Result::Failed;
+    RS_LayerList *layers = m_document->getLayerList();
+    RS_Layer *layer = layers ? layers->find(oldName) : nullptr;
+    if (!layer) {
+        m_lastError = QStringLiteral("no layer \"%1\"").arg(oldName);
+        return Result::NotFound;
+    }
+    if (newName.isEmpty()) {
+        m_lastError = QStringLiteral("the new layer name is empty");
+        return Result::Refused;
+    }
+    if (layers->find(newName)) {
+        m_lastError = QStringLiteral("a layer named \"%1\" already exists")
+                          .arg(newName);
+        return Result::Refused;
+    }
+    if (oldName == QLatin1String("0")) {
+        m_lastError = QStringLiteral("layer \"0\" cannot be renamed "
+                                     "(DXF requires it)");
+        return Result::Refused;
+    }
+
+    // What the layer dialog does (RS_ActionLayersEdit): hand edit() a layer
+    // carrying the new name; it copies it over the old one in place and fires
+    // layerEdited. The RS_Layer object, and so every entity's pointer to it,
+    // stays the same. clone() is a bound symbol; the copy is deleted here.
+    RS_Layer *renamed = layer->clone();
+    renamed->setName(newName);
+    layers->edit(layer, *renamed);
+    delete renamed;
+
+    // The action then refreshes entities that depend on the layer.
+    for (RS_Entity *entity : *m_document) {
+        if (entity->getLayer(false) == layer)
+            entity->update();
+    }
+    return Result::Done;
+}
+
+bool NativeBridge::blockNames(QStringList *names) const
+{
+    if (!modificationAvailable())
+        return false;
+    RS_BlockList *blocks = m_document->getBlockList();
+    if (!blocks)
+        return false;
+    for (int i = 0; i < blocks->count(); ++i) {
+        RS_Block *block = blocks->at(i);
+        if (!block->isUndone())
+            names->append(block->getName());
+    }
+    return true;
+}
+
+NativeBridge::Result NativeBridge::defineBlock(const QString &name,
+                                               const QPointF &base,
+                                               bool remove, int *selected)
+{
+    if (!modificationAvailable())
+        return Result::Failed;
+    RS_BlockList *blocks = m_document->getBlockList();
+    if (!blocks)
+        return Result::Failed;
+    if (name.isEmpty()) {
+        m_lastError = QStringLiteral("the block name is empty");
+        return Result::Refused;
+    }
+    // RS_BlockList::add() deletes a block whose name is taken, and
+    // createBlock() would hand back that dangling pointer, so check first.
+    // find() also sees a removed block that is only held for undo.
+    if (blocks->find(name)) {
+        m_lastError = QStringLiteral("a block named \"%1\" already exists "
+                                     "(or was removed and is held for undo)")
+                          .arg(name);
+        return Result::Refused;
+    }
+
+    *selected = 0;
+    for (RS_Entity *entity : *m_document) {
+        if (entity->isSelected() && !entity->isUndone())
+            ++*selected;
+    }
+    if (*selected == 0) {
+        m_lastError = QStringLiteral("none of the entities is in the drawing");
+        return Result::Refused;
+    }
+
+    // RS_BlockData's constructor is a bound symbol, but its members are
+    // public: fill them in instead.
+    RS_BlockData data;
+    data.name = name;
+    data.basePoint = toVector(base);
+    data.frozen = false;
+
+    // Create Block's own call (RS_ActionBlocksCreate::trigger): clones the
+    // selected entities into a new block translated by -base, optionally
+    // removes the originals under an undo section, and adds the block to the
+    // graphic's list. The session's undo cycle is already open, so the
+    // section it starts nests inside it.
+    RS_Creation creation(m_document, m_graphicView);
+    RS_Block *block = creation.createBlock(&data, data.basePoint, remove);
+    if (!block || !blocks->find(name)) {
+        m_lastError = QStringLiteral("RS_Creation::createBlock did not add "
+                                     "the block");
+        return Result::Failed;
+    }
+    return Result::Done;
+}
+
+namespace {
+
+//! Live INSERTs of \a name directly inside \a container.
+int countInsertsIn(RS_EntityContainer *container, const QString &name)
+{
+    int count = 0;
+    for (RS_Entity *entity : *container) {
+        if (entity->rtti() == RS2::EntityInsert && !entity->isUndone()
+            && static_cast<RS_Insert *>(entity)->getName() == name) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+//! The container that holds the drawing's own entities (and its inserts):
+//! the graphic, also when the active document is a block being edited.
+RS_EntityContainer *drawingContainer(RS_Document *document)
+{
+    RS_Graphic *graphic = document->getGraphic();
+    return graphic ? static_cast<RS_EntityContainer *>(graphic)
+                   : static_cast<RS_EntityContainer *>(document);
+}
+
+} // namespace
+
+int NativeBridge::blockInsertCount(const QString &name) const
+{
+    if (!modificationAvailable())
+        return -1;
+    int count = countInsertsIn(drawingContainer(m_document), name);
+    // Inserts nested in other block definitions count as references too
+    // (RS_ActionBlocksRemove looks in the same places).
+    if (RS_BlockList *blocks = m_document->getBlockList()) {
+        for (int i = 0; i < blocks->count(); ++i) {
+            RS_Block *block = blocks->at(i);
+            if (!block->isUndone())
+                count += countInsertsIn(block, name);
+        }
+    }
+    return count;
+}
+
+NativeBridge::Result NativeBridge::renameBlock(const QString &oldName,
+                                               const QString &newName)
+{
+    if (!modificationAvailable())
+        return Result::Failed;
+    RS_BlockList *blocks = m_document->getBlockList();
+    RS_Block *block = blocks ? blocks->find(oldName) : nullptr;
+    if (!block || block->isUndone()) {
+        m_lastError = QStringLiteral("no block \"%1\"").arg(oldName);
+        return Result::NotFound;
+    }
+    if (newName.isEmpty()) {
+        m_lastError = QStringLiteral("the new block name is empty");
+        return Result::Refused;
+    }
+    if (blocks->find(newName)) {
+        m_lastError = QStringLiteral("a block named \"%1\" already exists "
+                                     "(or was removed and is held for undo)")
+                          .arg(newName);
+        return Result::Refused;
+    }
+    if (!blocks->rename(block, newName)) {
+        m_lastError = QStringLiteral("RS_BlockList::rename refused");
+        return Result::Failed;
+    }
+    // RS_BlockList::rename() renames the block and only the inserts nested in
+    // *other blocks*; the inserts in the drawing are the caller's business,
+    // which is why the Block Attributes action calls renameInserts() next.
+    RS_EntityContainer *top = drawingContainer(m_document);
+    top->renameInserts(oldName, newName);   // virtual
+    blocks->addNotification();
+    top->updateInserts();                   // virtual
+    return Result::Done;
+}
+
+NativeBridge::Result NativeBridge::removeBlock(const QString &name)
+{
+    if (!modificationAvailable())
+        return Result::Failed;
+    RS_BlockList *blocks = m_document->getBlockList();
+    RS_Block *block = blocks ? blocks->find(name) : nullptr;
+    if (!block || block->isUndone()) {
+        m_lastError = QStringLiteral("no block \"%1\"").arg(name);
+        return Result::NotFound;
+    }
+    const int inserts = blockInsertCount(name);
+    if (inserts > 0) {
+        m_lastError = QStringLiteral("block \"%1\" is still referenced by %2 "
+                                     "insert(s); remove them first")
+                          .arg(name).arg(inserts);
+        return Result::Refused;
+    }
+
+    // RS_ActionBlocksRemove, minus the dialog and the insert clean-up (there
+    // are none): the block stays in the list, flagged undone, and is
+    // registered with the undo cycle so undo brings it back. Everything that
+    // lists blocks has to skip undone ones; blockNames() does.
+    block->selectedInBlockList(false);
+    if (block == blocks->getActive())
+        blocks->activate(static_cast<RS_Block *>(nullptr));
+    block->setUndoState(true);
+    m_document->addUndoable(block);
+    blocks->addNotification();
+    drawingContainer(m_document)->updateInserts();
+    return Result::Done;
+}
+
+NativeBridge::Result NativeBridge::blockEntities(const QString &name,
+                                                 Document_Interface *doc,
+                                                 QList<Plug_Entity *> *out)
+{
+    if (!modificationAvailable() || !doc)
+        return Result::Failed;
+    RS_BlockList *blocks = m_document->getBlockList();
+    RS_Block *block = blocks ? blocks->find(name) : nullptr;
+    if (!block || block->isUndone()) {
+        m_lastError = QStringLiteral("no block \"%1\"").arg(name);
+        return Result::NotFound;
+    }
+    // The same wrapper getAllEntities() builds. Doc_plugin_interface is the
+    // class behind every Document_Interface LibreCAD hands to a plugin. The
+    // wrapper does not own the entity. An entity with no resolvable layer is
+    // left out: Plugin_Entity::getData() dereferences it.
+    auto *dpi = static_cast<Doc_plugin_interface *>(doc);
+    for (RS_Entity *entity : *block) {
+        if (entity->isUndone() || !entity->getLayer())
+            continue;
+        out->append(reinterpret_cast<Plug_Entity *>(
+            new Plugin_Entity(entity, dpi)));
+    }
+    return Result::Done;
+}
+
+bool NativeBridge::entityLength(Plug_Entity *entity, double *length) const
+{
+    RS_Entity *rsEntity = m_versionOk ? underlyingEntity(entity) : nullptr;
+    if (!rsEntity)
+        return false;
+    // Virtual. Negative means "no length" (text, hatch, image, ...).
+    const double value = rsEntity->getLength();
+    if (value < 0.0)
+        return false;
+    *length = value;
+    return true;
+}
+
+bool NativeBridge::entityArea(Plug_Entity *entity, double *area,
+                              bool *meaningful) const
+{
+    RS_Entity *rsEntity = m_versionOk ? underlyingEntity(entity) : nullptr;
+    if (!rsEntity)
+        return false;
+    *area = 0.0;
+    *meaningful = false;
+    // areaLineIntegral() is Green's theorem along the entity, from start to
+    // end: for anything that is not a closed loop it is just that integral,
+    // not an area. So only the three shapes that enclose one are asked.
+    switch (rsEntity->rtti()) {
+    case RS2::EntityCircle:
+        *meaningful = true;
+        break;
+    case RS2::EntityEllipse:
+        *meaningful = !static_cast<RS_Ellipse *>(rsEntity)->isEllipticArc();
+        break;
+    case RS2::EntityPolyline:
+        *meaningful = static_cast<RS_Polyline *>(rsEntity)->isClosed();
+        break;
+    default:
+        break;
+    }
+    if (*meaningful)
+        *area = rsEntity->areaLineIntegral();   // virtual
+    return true;
+}
+
+bool NativeBridge::intersections(Plug_Entity *a, Plug_Entity *b,
+                                 bool onEntities, QList<QPointF> *points) const
+{
+    RS_Entity *first = m_versionOk ? underlyingEntity(a) : nullptr;
+    RS_Entity *second = m_versionOk ? underlyingEntity(b) : nullptr;
+    if (!first || !second)
+        return false;
+    const RS_VectorSolutions solutions =
+        RS_Information::getIntersection(first, second, onEntities);   // bound
+    for (size_t i = 0; i < solutions.size(); ++i) {
+        const RS_Vector point = solutions.get(i);
+        if (point.valid)
+            points->append(QPointF(point.x, point.y));
+    }
+    return true;
+}
+
+bool NativeBridge::entityDistance(Plug_Entity *entity, const QPointF &point,
+                                  double *distance) const
+{
+    RS_Entity *rsEntity = m_versionOk ? underlyingEntity(entity) : nullptr;
+    // isVisible() is false for undone entities and those on frozen layers,
+    // which is what the pick tools skip as well.
+    if (!rsEntity || !rsEntity->isVisible())
+        return false;
+    // Virtual; the arguments after the point are the declared defaults,
+    // spelled out because default arguments are resolved at the call site.
+    const double value = rsEntity->getDistanceToPoint(
+        toVector(point), nullptr, RS2::ResolveNone, RS_MAXDOUBLE);
+    if (value >= RS_MAXDOUBLE)
+        return false;
+    *distance = qMax(0.0, value);   // negative: inside a solid
+    return true;
+}
+
+bool NativeBridge::nearestPoint(Plug_Entity *entity, const QPointF &point,
+                                bool onEntity, QPointF *nearest,
+                                double *distance) const
+{
+    RS_Entity *rsEntity = m_versionOk ? underlyingEntity(entity) : nullptr;
+    if (!rsEntity)
+        return false;
+    double value = 0.0;
+    const RS_Vector found = rsEntity->getNearestPointOnEntity(
+        toVector(point), onEntity, &value, nullptr);   // virtual
+    if (!found.valid)
+        return false;
+    *nearest = QPointF(found.x, found.y);
+    *distance = value;
+    return true;
+}
+
+NativeBridge::Result NativeBridge::pointInside(Plug_Entity *entity,
+                                               const QPointF &point,
+                                               bool *inside, bool *onContour)
+{
+    RS_Entity *rsEntity = m_versionOk ? underlyingEntity(entity) : nullptr;
+    if (!rsEntity)
+        return Result::Failed;
+    *inside = false;
+    *onContour = false;
+    constexpr double tolerance = 1.0e-6;
+
+    switch (rsEntity->rtti()) {
+    case RS2::EntityPolyline: {
+        auto *polyline = static_cast<RS_Polyline *>(rsEntity);
+        if (!polyline->isClosed()) {
+            m_lastError = QStringLiteral("the polyline is not closed");
+            return Result::Refused;
+        }
+        // isPointInsideContour() casts a ray and counts crossings with the
+        // contour's atomic members (it resolves nested containers itself),
+        // so a closed polyline is a valid contour as it stands. It reports
+        // points exactly on the boundary as onContour and may or may not
+        // count them as inside.
+        bool on = false;
+        *inside = RS_Information::isPointInsideContour(
+            toVector(point), polyline, &on);   // bound
+        *onContour = on;
+        return Result::Done;
+    }
+    case RS2::EntityCircle: {
+        auto *circle = static_cast<RS_Circle *>(rsEntity);
+        const RS_Vector center = circle->getCenter();
+        const double radius = circle->getRadius();
+        const double distance = std::hypot(point.x() - center.x,
+                                           point.y() - center.y);
+        *onContour = std::abs(distance - radius) <= tolerance;
+        *inside = distance <= radius + tolerance;
+        return Result::Done;
+    }
+    case RS2::EntityEllipse: {
+        auto *ellipse = static_cast<RS_Ellipse *>(rsEntity);
+        if (ellipse->isEllipticArc()) {
+            m_lastError = QStringLiteral("an elliptic arc encloses nothing");
+            return Result::Refused;
+        }
+        // Into the ellipse's own frame: u along the major axis.
+        const RS_Vector center = ellipse->getCenter();
+        const RS_Vector major = ellipse->getMajorP();
+        const double a = std::hypot(major.x, major.y);
+        const double b = a * ellipse->getRatio();
+        const double dx = point.x() - center.x;
+        const double dy = point.y() - center.y;
+        const double u = (dx * major.x + dy * major.y) / a;
+        const double v = (-dx * major.y + dy * major.x) / a;
+        const double value = (u * u) / (a * a) + (v * v) / (b * b);
+        *onContour = std::abs(value - 1.0) <= tolerance;
+        *inside = value <= 1.0 + tolerance;
+        return Result::Done;
+    }
+    default:
+        break;
+    }
+    m_lastError = QStringLiteral("only a closed polyline, circle, or full "
+                                 "ellipse encloses a region");
+    return Result::Refused;
 }
 
 } // namespace lcbridge

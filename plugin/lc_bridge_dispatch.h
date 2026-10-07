@@ -168,6 +168,23 @@ private:
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
 
+    QJsonValue opGetLayerState(const QJsonObject &args);
+    QJsonValue opSetLayerState(const QJsonObject &args);
+    QJsonValue opRenameLayer(const QJsonObject &args);
+    QJsonValue opGetLayerStates(const QJsonObject &args);
+    QJsonValue opBlockDefine(const QJsonObject &args);
+    QJsonValue opBlockRename(const QJsonObject &args);
+    QJsonValue opBlockRemove(const QJsonObject &args);
+    QJsonValue opBlockEntities(const QJsonObject &args);
+    QJsonValue opEntityLength(const QJsonObject &args);
+    QJsonValue opEntityArea(const QJsonObject &args);
+    QJsonValue opIntersections(const QJsonObject &args);
+    QJsonValue opNearestEntity(const QJsonObject &args);
+    QJsonValue opNearestPoint(const QJsonObject &args);
+    QJsonValue opPointInside(const QJsonObject &args);
+    QJsonValue opEntityId(const QJsonObject &args);
+    QJsonValue opFindEntity(const QJsonObject &args);
+
     //! Entities of \a dpiType currently in the drawing.
     int countEntitiesOfType(int dpiType);
     //! Set every entity's selection flag; count of entities touched.
@@ -191,6 +208,9 @@ private:
     QJsonArray newEntitiesSince(const QSet<const void *> &before);
     //! Forget the handles in  handles (the entities were replaced).
     void invalidateHandles(const QJsonArray &handles);
+    //! Register \a entity under a fresh handle and describe it in the
+    //! get_entities row format ({handle, type, data}). Takes ownership.
+    QJsonObject entityRow(Plug_Entity *entity);
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

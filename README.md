@@ -173,6 +173,59 @@ times out.
 `python/examples/native_demo.py` draws a hatched, dimensioned plate through all of this. See
 `docs/findings.md`, "Native access", for how it works and what it depends on.
 
+**Layer state.** `doc.layer_state(name)` (`frozen`, `locked`, `print`, `construction`, and
+`visible`, which is just "not frozen"), `doc.layer_states()` for every layer in one call,
+`doc.set_layer_state(name, frozen=True, locked=False, ...)` (omitted flags are kept; goes through
+the same layer-list calls as the layer panel's checkboxes, so the panel and the view follow), and
+`doc.rename_layer(old, new)`. A rename is done in place, so entities stay on the layer; it is
+refused for an empty or taken name and for layer `0`. Layer state is not in LibreCAD's undo
+system, so none of this is undoable.
+
+```python
+doc.set_layer_state("FURNITURE", frozen=True)          # hide it
+doc.rename_layer("WALLS", "WALLS-EXISTING")
+{s["name"]: s["locked"] for s in doc.layer_states()}
+```
+
+**Blocks.** `doc.define_block(name, base_point, entities, remove=True, insert=False)` is Create
+Block: the entities are copied into a new block with `base_point` as its origin, the originals are
+removed (undoably; they go stale) unless `remove=False`, and `insert=True` also drops one INSERT at
+the base point, returned as `(name, entity)`. The block definition itself is not undoable (LibreCAD
+adds it to the block list without an undo record), so undoing the step brings the originals back
+but leaves the block. `doc.rename_block(old, new)` renames the block and every INSERT naming it
+(`RS_BlockList::rename` alone only updates inserts nested in other blocks; the drawing's inserts
+need the second call the Block Attributes tool makes); not undoable.
+`doc.remove_block(name)` is refused while any INSERT, in the drawing or in another block, refers
+to it, and otherwise removes it undoably like the Remove Block tool: LibreCAD only flags the block
+undone and keeps it in its list, so the bridge's `blocks` skips those, and the name stays taken
+until the undo history lets go of it. `doc.block_entities(name)` returns the block's members (in
+block coordinates) with ordinary handles; use them for reads, release them before removing the
+block.
+
+```python
+a, b = doc.entities(types=["LINE"])[:2]
+name, insert = doc.define_block("CORNER", (0, 0), [a, b], insert=True)
+doc.rename_block("CORNER", "CORNER-A")
+for member in doc.block_entities("CORNER-A"): print(member.type, member.length())
+```
+
+**Geometry queries.** `entity.length()` (None for text and hatches), `entity.area()` (circle, full
+ellipse, closed polyline, bulges included; 0.0 for anything that encloses nothing),
+`entity.intersections(other, on_entities=True)`, `doc.nearest_entity(point, types=None,
+max_distance=None)` (the distance is `entity.distance`; frozen layers are skipped, locked ones are
+not), `entity.nearest_point(point, on_entity=True)` (`((x, y), distance)`),
+`entity.contains(point)` (closed polyline, circle, full ellipse; anything else is refused), and
+`entity.id` / `doc.find_entity(id)`. The id is LibreCAD's own entity id: the same across
+`entities()` calls (a handle is per call), but not saved in the file and replaced when LibreCAD
+replaces the entity (`move()` and the like make a new one).
+
+```python
+room = doc.entities(types=["POLYLINE"])[0]
+room.area(), room.length(), room.contains((1500, 1000))
+wall = doc.nearest_entity((1500, -30), types=["LINE"], max_distance=100)
+room.id, doc.find_entity(room.id)
+```
+
 ### Drawn dimensions
 
 The portable fallback: the API can also draw dimensions out of plain lines and text: extension lines, dimension line, tick or arrow
@@ -245,6 +298,9 @@ Conventions, uniform across every operation:
 | Undo* | `undo_checkpoint`, `undo`, `redo` |
 | Files* | `file_info`, `file_save`, `file_save_as` |
 | Session (server-level, not in the list) | `session`, `shutdown`, `file_open`* (`open`), `file_new`* (`new`) |
+| Layer state* | `get_layer_state` (`layer_state`), `get_layer_states` (`layer_states`), `set_layer_state`, `rename_layer` |
+| Blocks* | `block_define` (`define_block`), `block_rename` (`rename_block`), `block_remove` (`remove_block`), `block_entities`; `get_blocks` also stops listing removed blocks |
+| Geometry queries* | `entity_length` (`length`), `entity_area` (`area`), `intersections`, `nearest_entity`, `nearest_point`, `point_inside` (`contains`), `entity_id` (`id`), `find_entity` |
 
 \* native layer; `unavailable` on a version mismatch or the stub.
 
@@ -318,10 +374,9 @@ Still missing, roughly in order of value:
   fillet (round), chamfer (bevel), cut, bulk attribute change, revert direction.
 - Creation gaps: `add_mtext` (the plugin API has `addMText`, unwrapped), `add_image`, the other
   dimension kinds (radial, diametric, angular, leader) through the command line.
-- Layer state (freeze, lock, hide, rename) and block definition from entities.
 - View and windows: zoom, visible area, `file_close`, listing and switching documents (every
   `open()` leaves its window behind), export to PDF/SVG.
-- Queries: lengths, areas, intersections, nearest entity, stable entity ids across sessions.
+- Queries across sessions: entity ids are per process (they are not stored in the file).
 - The interactive prompts as explicit blocking operations, and push events (selection changed,
   document modified) for live sync.
 

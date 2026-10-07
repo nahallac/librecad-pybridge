@@ -143,6 +143,70 @@ cycles nest inside `execPlug()`'s outer `LC_UndoSection` like everything else.
 Dimension appearance follows the drawing's dimension variables (`$DIMTXT`, `$DIMASZ`, `$DIMEXO`,
 `$DIMEXE`, ...), which `addVariable()` can set through the ordinary `set_variable` operation.
 
+**Layer state, blocks, and geometry queries (2026-10-06).** All of it is `RS_Document::getLayerList()
+/ getBlockList()` (virtual, so no cast to `RS_Graphic` is needed) and virtual `RS_Entity` methods,
+plus a handful of bound symbols (`RS_LayerList::{find,set*Multi}`, `RS_Layer::{is*,clone,setName}`,
+`RS_BlockList::{find,at,count,activate}`, `RS_Creation::{ctor,createBlock}`,
+`RS_Information::{getIntersection,isPointInsideContour}`, `Plugin_Entity::Plugin_Entity`, ...).
+`RS_LayerList`/`RS_BlockList` methods that look bindable (`edit`, `rename`, `add`, `remove`,
+`addNotification`) are virtual, so they cost no symbol. What was learned:
+
+- **`RS_BlockList::rename` does not rename the drawing's inserts.** It sets the name and
+  renames inserts nested in *other blocks* only. The Block Attributes action follows it with
+  `graphic->renameInserts(old, new)`, `addBlockNotification()`; `block_rename` does the same.
+  Entity handles of the inserts stay valid and read the new name.
+- **Block removal is an undo flag, not a removal.** `RS_ActionBlocksRemove` sets
+  `setUndoState(true)` on the block and `addUndoable()`s it; the block stays in `RS_BlockList`
+  (the block widget, the DXF writer and the other filters skip `isUndone()` blocks).
+  Consequences: `Document_Interface::getAllBlocks()` still lists a removed block, so `get_blocks`
+  asks the native layer and skips them; `RS_BlockList::find()` still finds it, so a new block of
+  that name is refused until the undo history drops it; and `undo()` really does bring the block
+  back (verified). `block_remove` mirrors this and, unlike the GUI tool, refuses while a live
+  INSERT names the block instead of undoing the inserts too.
+- **`RS_Creation::createBlock` is exported and does the whole of Create Block**: clones the
+  selected entities with `move(-base)`, undoably removes the originals when asked, and adds the
+  block to the list. It does not register the *block* with the undo system, so a block definition
+  survives `undo()`. It also deletes the new block when `RS_BlockList::add` refuses a duplicate
+  name and then returns the dangling pointer, so the name is checked first. The base point is
+  subtracted from the member coordinates (a block made at `(1000, 1000)` holds a line from
+  `(0, 0)`).
+- **Block members can be wrapped as `Plugin_Entity`** (the constructor is exported; the wrapper
+  needs the session's `Doc_plugin_interface*`, which is what `execComm()` gave the dispatcher) and
+  then behave like any handle for reads: `entity_data`, `entity_bbox`, `entity_length`. Members
+  of blocks loaded from a DXF file work too (verified after save and reopen). The wrapper does
+  not own the entity, and nothing keeps the entity alive if its block is freed, so the Python
+  docstring tells callers to release those handles first. `getData()` dereferences the entity's
+  layer; members without a resolvable layer are left out rather than risking a crash.
+- **Layers are renamed by `RS_LayerList::edit(layer, clone-with-new-name)`**, exactly as the
+  layer dialog does. It copies the clone over the existing `RS_Layer` object in place, so every
+  entity's `RS_Layer*` follows and `entity_data` reports the new name (verified, as is the
+  active layer). The list is not re-sorted. Layer `0` is refused: DXF needs it.
+- **`RS_LayerList::set{Freeze,Lock,Print,Construction}Multi(unset, set)`** are what the layer
+  widget calls; each fires `layerToggled(nullptr)` on the listeners. Frozen layers hide their
+  entities (`getAllEntities(visible_only=True)` and `RS_Entity::isVisible()` agree).
+- **`entity_id`: the id was already there.** `Plugin_Entity::getData()` puts
+  `entity->getId()` under `DPI::EID`, which the dispatcher has always reported as `data["id"]`;
+  `entity_id`/`find_entity` use it (`find_entity` skips undone entities). Ids are assigned when an
+  `RS_Entity` is constructed or cloned, so they are stable per entity but not per drawing file,
+  and `move`/`rotate`/`scale`/`update` (which clone) give the entity a new one.
+- **`areaLineIntegral()` is a line integral, not an area**, except for closed shapes: a circle
+  gives pi r^2, a full ellipse pi a b, a closed polyline `|contour| + closed loops - holes`
+  (`RS_EntityContainer::areaLineIntegral`, which also logs and calls `setLayer()` on its
+  members). For a line it is the `x dy` term, for an open polyline a meaningless number, so
+  `entity_area` only asks circles, full ellipses and closed polylines and reports 0 otherwise.
+  Bulged polyline segments are handled (a 100x100 square with one semicircular bulge reads
+  13926.99).
+- **`isPointInsideContour` takes an `RS_EntityContainer*` and walks its atomic members with
+  `ResolveAll`**, so a closed `RS_Polyline` (itself a container) is a valid contour as it is;
+  no temporary container is needed (and one would reparent the entities it adds). Circles and
+  full ellipses are plain atomic entities, so `point_inside` answers those with the geometry
+  directly.
+- **`nearest_entity` runs its own loop instead of `RS_Information::getNearestEntity`.** The engine
+  function cannot filter by type or distance, and its answer is the same
+  `RS_Entity::getDistanceToPoint` minimum over visible, unlocked entities; the loop applies the
+  type and distance filters first and maps the winner to a handle without searching twice. Locked
+  layers are searched (the engine function skips them, because it exists for picking).
+
 ---
 
 ## Risk 1 — undo integration: resolved, better than hoped

@@ -32,10 +32,15 @@
 #ifndef LC_BRIDGE_NATIVE_H
 #define LC_BRIDGE_NATIVE_H
 
+#include <QList>
 #include <QObject>
 #include <QPointF>
 #include <QString>
+#include <QStringList>
 
+#include <optional>
+
+class Document_Interface;
 class Plug_Entity;
 class QG_CommandWidget;
 class QTimer;
@@ -167,6 +172,93 @@ public:
                         double angleDegrees, bool solid, int timeoutMs = 3000);
     void disarmHatchDialog();
     bool hatchDialogHandled() const { return m_hatchDialogHandled; }
+
+    // ---- Layer state, block definition, geometry queries -------------------
+    //
+    // Layers and blocks are reached through the document's RS_LayerList and
+    // RS_BlockList (virtual accessors on RS_Document); the queries call
+    // virtual RS_Entity methods or RS_Information's static functions. The
+    // mutating calls report why they refused through lastError() and the
+    // returned Result; the dispatcher maps NotFound / Refused / Failed to
+    // not_found / bad_request / failed.
+
+    enum class Result { Done, NotFound, Refused, Failed };
+
+    //! A layer's four flags. "visible" is the inverse of frozen.
+    struct LayerState
+    {
+        bool frozen {false};
+        bool locked {false};
+        bool print {true};
+        bool construction {false};
+    };
+    //! Flags to change; unset members are left alone.
+    struct LayerStatePatch
+    {
+        std::optional<bool> frozen;
+        std::optional<bool> locked;
+        std::optional<bool> print;
+        std::optional<bool> construction;
+    };
+
+    //! The state of the layer called \a name; false when there is none.
+    bool layerState(const QString &name, LayerState *state) const;
+    //! Apply \a patch through RS_LayerList's set*Multi functions, the ones
+    //! the layer widget uses, so every layer-list listener fires and the
+    //! view redraws. Not undoable (layer state is not in the undo system).
+    Result setLayerState(const QString &name, const LayerStatePatch &patch);
+    //! Rename a layer in place with RS_LayerList::edit() and a clone that
+    //! carries the new name -- the layer dialog's path. Entities hold the
+    //! RS_Layer pointer, so they follow the rename. Not undoable.
+    Result renameLayer(const QString &oldName, const QString &newName);
+
+    //! Names of the blocks that are really in the drawing: LibreCAD's block
+    //! removal only marks a block undone and leaves it in the list, and the
+    //! plugin API's getAllBlocks() lists those too.
+    bool blockNames(QStringList *names) const;
+    //! Create a block named \a name from the current selection, with the
+    //! base point \a base, via RS_Creation::createBlock (what Create Block
+    //! does). \a remove takes the originals out of the drawing, undoably;
+    //! the block definition itself is not undoable. \a selected receives the
+    //! number of entities that went into the block.
+    Result defineBlock(const QString &name, const QPointF &base, bool remove,
+                       int *selected);
+    //! Rename a block and the inserts that name it, everywhere (the block
+    //! attributes action's two calls). Not undoable.
+    Result renameBlock(const QString &oldName, const QString &newName);
+    //! Remove a block the way the Remove Block action does: mark it undone
+    //! and register it with the undo cycle, so it is undoable. Refused while
+    //! any live INSERT, in the drawing or in another block, names it.
+    Result removeBlock(const QString &name);
+    //! Live INSERT entities that name \a name, in the drawing and in every
+    //! block. -1 when unavailable.
+    int blockInsertCount(const QString &name) const;
+    //! Plugin wrappers for the entities inside block \a name, owned by the
+    //! caller. \a doc is the session's Document_Interface (the wrapper needs
+    //! its Doc_plugin_interface).
+    Result blockEntities(const QString &name, Document_Interface *doc,
+                         QList<Plug_Entity *> *out);
+
+    //! RS_Entity::getLength(); false when the entity has none (text, hatch).
+    bool entityLength(Plug_Entity *entity, double *length) const;
+    //! The enclosed area: circle, full ellipse, closed polyline. Everything
+    //! else is reported as 0 with \a meaningful false.
+    bool entityArea(Plug_Entity *entity, double *area, bool *meaningful) const;
+    //! Intersection points of two entities (RS_Information::getIntersection).
+    bool intersections(Plug_Entity *a, Plug_Entity *b, bool onEntities,
+                       QList<QPointF> *points) const;
+    //! Distance from \a point to the entity, false when the entity is hidden
+    //! (undone, frozen layer, invisible) or has no distance.
+    bool entityDistance(Plug_Entity *entity, const QPointF &point,
+                        double *distance) const;
+    //! The point on the entity (or on its infinite extension when
+    //! \a onEntity is false) nearest to \a point.
+    bool nearestPoint(Plug_Entity *entity, const QPointF &point, bool onEntity,
+                      QPointF *nearest, double *distance) const;
+    //! Whether \a point is inside a closed polyline, circle, or full ellipse.
+    //! Refused for anything else.
+    Result pointInside(Plug_Entity *entity, const QPointF &point, bool *inside,
+                       bool *onContour);
 
 private:
     void pollForHatchDialog();

@@ -56,4 +56,21 @@ void NativeBridge::armHatchDialog(const QString &, double, double, bool, int) {}
 void NativeBridge::disarmHatchDialog() {}
 void NativeBridge::pollForHatchDialog() {}
 
+// Layer state, block definition, geometry queries.
+bool NativeBridge::layerState(const QString &, LayerState *) const { return false; }
+NativeBridge::Result NativeBridge::setLayerState(const QString &, const LayerStatePatch &) { return Result::Failed; }
+NativeBridge::Result NativeBridge::renameLayer(const QString &, const QString &) { return Result::Failed; }
+bool NativeBridge::blockNames(QStringList *) const { return false; }
+NativeBridge::Result NativeBridge::defineBlock(const QString &, const QPointF &, bool, int *) { return Result::Failed; }
+NativeBridge::Result NativeBridge::renameBlock(const QString &, const QString &) { return Result::Failed; }
+NativeBridge::Result NativeBridge::removeBlock(const QString &) { return Result::Failed; }
+int NativeBridge::blockInsertCount(const QString &) const { return -1; }
+NativeBridge::Result NativeBridge::blockEntities(const QString &, Document_Interface *, QList<Plug_Entity *> *) { return Result::Failed; }
+bool NativeBridge::entityLength(Plug_Entity *, double *) const { return false; }
+bool NativeBridge::entityArea(Plug_Entity *, double *, bool *) const { return false; }
+bool NativeBridge::intersections(Plug_Entity *, Plug_Entity *, bool, QList<QPointF> *) const { return false; }
+bool NativeBridge::entityDistance(Plug_Entity *, const QPointF &, double *) const { return false; }
+bool NativeBridge::nearestPoint(Plug_Entity *, const QPointF &, bool, QPointF *, double *) const { return false; }
+NativeBridge::Result NativeBridge::pointInside(Plug_Entity *, const QPointF &, bool *, bool *) { return Result::Failed; }
+
 } // namespace lcbridge

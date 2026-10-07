@@ -178,7 +178,22 @@ def main() -> int:
                          lambda: doc.undo_checkpoint(),
                          lambda: doc.undo(),
                          lambda: doc.open("/nonexistent.dxf"),
-                         lambda: doc.new()):
+                         lambda: doc.new(),
+                         lambda: doc.layer_state("0"),
+                         lambda: doc.layer_states(),
+                         lambda: doc.set_layer_state("0", locked=True),
+                         lambda: doc.rename_layer("0", "ZERO"),
+                         lambda: doc.define_block("B", (0, 0), [probe]),
+                         lambda: doc.rename_block("B", "C"),
+                         lambda: doc.remove_block("B"),
+                         lambda: doc.block_entities("B"),
+                         lambda: probe.length(),
+                         lambda: probe.area(),
+                         lambda: probe.intersections(probe),
+                         lambda: doc.nearest_entity((0, 0)),
+                         lambda: probe.nearest_point((0, 0)),
+                         lambda: probe.contains((0, 0)),
+                         lambda: doc.find_entity(1)):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

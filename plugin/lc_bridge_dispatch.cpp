@@ -581,6 +581,22 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("redo"),                 &Dispatcher::opRedo},
         {QStringLiteral("cmd_dim"),              &Dispatcher::opCmdDim},
         {QStringLiteral("cmd_hatch"),            &Dispatcher::opCmdHatch},
+        {QStringLiteral("get_layer_state"), &Dispatcher::opGetLayerState},
+        {QStringLiteral("set_layer_state"), &Dispatcher::opSetLayerState},
+        {QStringLiteral("rename_layer"), &Dispatcher::opRenameLayer},
+        {QStringLiteral("get_layer_states"), &Dispatcher::opGetLayerStates},
+        {QStringLiteral("block_define"), &Dispatcher::opBlockDefine},
+        {QStringLiteral("block_rename"), &Dispatcher::opBlockRename},
+        {QStringLiteral("block_remove"), &Dispatcher::opBlockRemove},
+        {QStringLiteral("block_entities"), &Dispatcher::opBlockEntities},
+        {QStringLiteral("entity_length"), &Dispatcher::opEntityLength},
+        {QStringLiteral("entity_area"), &Dispatcher::opEntityArea},
+        {QStringLiteral("intersections"), &Dispatcher::opIntersections},
+        {QStringLiteral("nearest_entity"), &Dispatcher::opNearestEntity},
+        {QStringLiteral("nearest_point"), &Dispatcher::opNearestPoint},
+        {QStringLiteral("point_inside"), &Dispatcher::opPointInside},
+        {QStringLiteral("entity_id"), &Dispatcher::opEntityId},
+        {QStringLiteral("find_entity"), &Dispatcher::opFindEntity},
     };
     return table;
 }
@@ -601,6 +617,17 @@ const QSet<QString> &Dispatcher::readOnlyOperations()
         QStringLiteral("file_info"),       QStringLiteral("file_save"),
         QStringLiteral("file_save_as"),    QStringLiteral("undo_checkpoint"),
         QStringLiteral("undo"),            QStringLiteral("redo"),
+        QStringLiteral("get_layer_state"),
+        QStringLiteral("get_layer_states"),
+        QStringLiteral("block_entities"),
+        QStringLiteral("entity_length"),
+        QStringLiteral("entity_area"),
+        QStringLiteral("intersections"),
+        QStringLiteral("nearest_entity"),
+        QStringLiteral("nearest_point"),
+        QStringLiteral("point_inside"),
+        QStringLiteral("entity_id"),
+        QStringLiteral("find_entity"),
     };
     return table;
 }
@@ -952,6 +979,11 @@ QJsonValue Dispatcher::opSetLayerProperties(const QJsonObject &args)
 QJsonValue Dispatcher::opGetBlocks(const QJsonObject &args)
 {
     Q_UNUSED(args)
+    // The plugin API lists blocks that were removed and are only kept for
+    // undo; the native layer knows which those are.
+    QStringList names;
+    if (m_native && m_native->blockNames(&names))
+        return toJsonArray(names);
     return toJsonArray(m_doc->getAllBlocks());
 }
 
@@ -1775,6 +1807,388 @@ QJsonValue Dispatcher::opCmdHatch(const QJsonObject &args)
     }
     m_doc->updateView();
     return QJsonValue();
+}
+
+// --------------------------------------------------------------------------
+// Layer state, block definition, geometry queries
+// --------------------------------------------------------------------------
+
+namespace {
+
+QJsonObject layerStateJson(const QString &name,
+                           const NativeBridge::LayerState &state)
+{
+    QJsonObject object;
+    if (!name.isNull())
+        object.insert(QStringLiteral("name"), name);
+    object.insert(QStringLiteral("frozen"), state.frozen);
+    object.insert(QStringLiteral("locked"), state.locked);
+    object.insert(QStringLiteral("print"), state.print);
+    object.insert(QStringLiteral("construction"), state.construction);
+    // What the user sees: a frozen layer is hidden.
+    object.insert(QStringLiteral("visible"), !state.frozen);
+    return object;
+}
+
+//! The optional "types" argument as DPI::ETYPE values (empty: any type).
+QList<int> typesFromArgs(const QJsonObject &args)
+{
+    QList<int> wanted;
+    if (!args.contains(QStringLiteral("types")))
+        return wanted;
+    const QJsonArray types = requireArray(args, QStringLiteral("types"), 1);
+    for (int i = 0; i < types.size(); ++i) {
+        int type = DPI::UNKNOWN;
+        if (!types.at(i).isString() || !nameToType(types.at(i).toString(), &type)) {
+            badArgs(QStringLiteral("\"types\"[%1] is not a known entity type")
+                        .arg(i));
+        }
+        wanted.append(type);
+    }
+    return wanted;
+}
+
+} // namespace
+
+//! Map a native refusal onto the protocol's error codes.
+[[noreturn]] static void throwNativeResult(NativeBridge::Result result,
+                                           const QString &message)
+{
+    switch (result) {
+    case NativeBridge::Result::NotFound:
+        throw RequestError(QStringLiteral("not_found"), message);
+    case NativeBridge::Result::Refused:
+        throw RequestError(QStringLiteral("bad_request"), message);
+    default:
+        throw RequestError(QStringLiteral("failed"), message);
+    }
+}
+
+QJsonObject Dispatcher::entityRow(Plug_Entity *entity)
+{
+    QHash<int, QVariant> data;
+    entity->getData(&data);
+    const auto typeField = data.constFind(DPI::ETYPE);
+    const int type = typeField == data.constEnd() ? DPI::UNKNOWN
+                                                  : typeField->toInt();
+    QJsonObject item;
+    item.insert(QStringLiteral("handle"), registerEntity(entity));
+    item.insert(QStringLiteral("type"), typeToName(type));
+    item.insert(QStringLiteral("data"), entityDataToJson(type, data));
+    return item;
+}
+
+QJsonValue Dispatcher::opGetLayerState(const QJsonObject &args)
+{
+    requireModification();
+    const QString name = requireString(args, QStringLiteral("name"));
+    NativeBridge::LayerState state;
+    if (!m_native->layerState(name, &state)) {
+        throw RequestError(QStringLiteral("not_found"),
+                           QStringLiteral("no layer \"%1\"").arg(name));
+    }
+    return layerStateJson(QString(), state);
+}
+
+QJsonValue Dispatcher::opGetLayerStates(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireModification();
+    QJsonArray result;
+    for (const QString &name : m_doc->getAllLayer()) {
+        NativeBridge::LayerState state;
+        if (m_native->layerState(name, &state))
+            result.append(layerStateJson(name, state));
+    }
+    return result;
+}
+
+QJsonValue Dispatcher::opSetLayerState(const QJsonObject &args)
+{
+    requireModification();
+    const QString name = requireString(args, QStringLiteral("name"));
+    NativeBridge::LayerStatePatch patch;
+    const auto flag = [&](const char *key) -> std::optional<bool> {
+        const QString field = QString::fromLatin1(key);
+        if (!args.contains(field))
+            return std::nullopt;
+        return optionalBool(args, field, false);
+    };
+    patch.frozen = flag("frozen");
+    patch.locked = flag("locked");
+    patch.print = flag("print");
+    patch.construction = flag("construction");
+    if (!patch.frozen && !patch.locked && !patch.print && !patch.construction) {
+        badArgs(QStringLiteral("give at least one of frozen, locked, print, "
+                               "construction"));
+    }
+
+    const NativeBridge::Result result = m_native->setLayerState(name, patch);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    m_doc->updateView();
+
+    NativeBridge::LayerState state;
+    m_native->layerState(name, &state);
+    return layerStateJson(QString(), state);
+}
+
+QJsonValue Dispatcher::opRenameLayer(const QJsonObject &args)
+{
+    requireModification();
+    const QString oldName = requireString(args, QStringLiteral("old"));
+    const QString newName = requireString(args, QStringLiteral("new"));
+    const NativeBridge::Result result = m_native->renameLayer(oldName, newName);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    m_doc->updateView();
+
+    NativeBridge::LayerState state;
+    m_native->layerState(newName, &state);
+    return layerStateJson(newName, state);
+}
+
+QJsonValue Dispatcher::opBlockDefine(const QJsonObject &args)
+{
+    requireModification();
+    const QString name = requireString(args, QStringLiteral("name"));
+    const QPointF base = requirePoint(args, QStringLiteral("base_point"));
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    const bool remove = optionalBool(args, QStringLiteral("remove"), true);
+    const bool insert = optionalBool(args, QStringLiteral("insert"), false);
+
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    int selected = 0;
+    const NativeBridge::Result result =
+        m_native->defineBlock(name, base, remove, &selected);
+    // createBlock() deselects what it takes, but a refusal leaves the
+    // selection as selectHandles() set it.
+    selectAll(false);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    if (remove)
+        invalidateHandles(handles);
+
+    QJsonObject out;
+    out.insert(QStringLiteral("name"), name);
+    out.insert(QStringLiteral("count"), selected);
+    out.insert(QStringLiteral("insert"), QJsonValue());
+    if (insert) {
+        // At the base point, unscaled and unrotated: the geometry appears
+        // exactly where it was, as after Create Block.
+        m_doc->addInsert(name, base, QPointF(1.0, 1.0), 0.0);
+        const QJsonArray rows = newEntitiesSince(before);
+        if (!rows.isEmpty())
+            out.insert(QStringLiteral("insert"), rows.first());
+    }
+    m_doc->updateView();
+    return out;
+}
+
+QJsonValue Dispatcher::opBlockRename(const QJsonObject &args)
+{
+    requireModification();
+    const QString oldName = requireString(args, QStringLiteral("old"));
+    const QString newName = requireString(args, QStringLiteral("new"));
+    const NativeBridge::Result result = m_native->renameBlock(oldName, newName);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    m_doc->updateView();
+    return newName;
+}
+
+QJsonValue Dispatcher::opBlockRemove(const QJsonObject &args)
+{
+    requireModification();
+    const NativeBridge::Result result =
+        m_native->removeBlock(requireString(args, QStringLiteral("name")));
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    m_doc->updateView();
+    return QJsonValue();
+}
+
+QJsonValue Dispatcher::opBlockEntities(const QJsonObject &args)
+{
+    requireModification();
+    QList<Plug_Entity *> entities;
+    const NativeBridge::Result result = m_native->blockEntities(
+        requireString(args, QStringLiteral("name")), m_doc, &entities);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    QJsonArray rows;
+    for (Plug_Entity *entity : entities)
+        rows.append(entityRow(entity));
+    return rows;
+}
+
+QJsonValue Dispatcher::opEntityLength(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    double length = 0.0;
+    QJsonObject result;
+    if (m_native->entityLength(lookupEntity(args), &length))
+        result.insert(QStringLiteral("length"), length);
+    else
+        result.insert(QStringLiteral("length"), QJsonValue());   // text, hatch...
+    return result;
+}
+
+QJsonValue Dispatcher::opEntityArea(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    double area = 0.0;
+    bool meaningful = false;
+    if (!m_native->entityArea(lookupEntity(args), &area, &meaningful)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("could not read the entity"));
+    }
+    QJsonObject result;
+    result.insert(QStringLiteral("area"), area);
+    result.insert(QStringLiteral("closed"), meaningful);
+    return result;
+}
+
+QJsonValue Dispatcher::opIntersections(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    Plug_Entity *a = lookupEntity(QJsonObject{
+        {QStringLiteral("handle"), requireValue(args, QStringLiteral("a"))}});
+    Plug_Entity *b = lookupEntity(QJsonObject{
+        {QStringLiteral("handle"), requireValue(args, QStringLiteral("b"))}});
+    const bool onEntities = optionalBool(args, QStringLiteral("on_entities"), true);
+    QList<QPointF> points;
+    if (!m_native->intersections(a, b, onEntities, &points)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("could not intersect the entities"));
+    }
+    QJsonArray result;
+    for (const QPointF &point : points)
+        result.append(pointJson(point));
+    return result;
+}
+
+QJsonValue Dispatcher::opNearestEntity(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    const QPointF point = requirePoint(args, QStringLiteral("point"));
+    const QList<int> wanted = typesFromArgs(args);
+    const bool limited = args.contains(QStringLiteral("max_distance"))
+                         && !args.value(QStringLiteral("max_distance")).isNull();
+    const double maxDistance = limited ? requireNumber(args, QStringLiteral("max_distance"))
+                                       : 0.0;
+
+    QList<Plug_Entity *> entities;
+    if (!m_doc->getAllEntities(&entities, false)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("getAllEntities() failed"));
+    }
+
+    // The nearest of the drawing's visible entities, by each entity's own
+    // distance function: the metric RS_EntityContainer::getNearestEntity
+    // uses, with the type filter and the distance cap applied here (the
+    // engine's function can do neither, and an unfiltered nearest hit would
+    // hide the nearest *wanted* one). The later entity wins a tie, as in the
+    // engine, which prefers what was drawn last.
+    Plug_Entity *best = nullptr;
+    double bestDistance = 0.0;
+    for (Plug_Entity *entity : entities) {
+        double distance = 0.0;
+        if (!entity
+            || (!wanted.isEmpty() && !wanted.contains(readEntityType(entity)))
+            || !m_native->entityDistance(entity, point, &distance)
+            || (limited && distance > maxDistance)
+            || (best && distance > bestDistance)) {
+            continue;
+        }
+        best = entity;
+        bestDistance = distance;
+    }
+    if (!best) {
+        qDeleteAll(entities);
+        return QJsonValue();
+    }
+    entities.removeOne(best);
+    qDeleteAll(entities);
+
+    QJsonObject row = entityRow(best);
+    row.insert(QStringLiteral("distance"), bestDistance);
+    return row;
+}
+
+QJsonValue Dispatcher::opNearestPoint(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    Plug_Entity *entity = lookupEntity(args);
+    const QPointF point = requirePoint(args, QStringLiteral("point"));
+    const bool onEntity = optionalBool(args, QStringLiteral("on_entity"), true);
+    QPointF nearest;
+    double distance = 0.0;
+    if (!m_native->nearestPoint(entity, point, onEntity, &nearest, &distance))
+        return QJsonValue();
+    QJsonObject result;
+    result.insert(QStringLiteral("point"), pointJson(nearest));
+    result.insert(QStringLiteral("distance"), distance);
+    return result;
+}
+
+QJsonValue Dispatcher::opPointInside(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    Plug_Entity *entity = lookupEntity(args);
+    const QPointF point = requirePoint(args, QStringLiteral("point"));
+    bool inside = false;
+    bool onContour = false;
+    const NativeBridge::Result result =
+        m_native->pointInside(entity, point, &inside, &onContour);
+    if (result != NativeBridge::Result::Done)
+        throwNativeResult(result, m_native->lastError());
+    return inside;
+}
+
+QJsonValue Dispatcher::opEntityId(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    QHash<int, QVariant> data;
+    lookupEntity(args)->getData(&data);
+    QJsonObject result;
+    result.insert(QStringLiteral("id"),
+                  static_cast<double>(data.value(DPI::EID).toULongLong()));
+    return result;
+}
+
+QJsonValue Dispatcher::opFindEntity(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    const QJsonValue idValue = requireValue(args, QStringLiteral("id"));
+    if (!idValue.isDouble())
+        badArgs(QStringLiteral("\"id\" must be a number"));
+    const qulonglong wanted = static_cast<qulonglong>(idValue.toDouble());
+
+    QList<Plug_Entity *> entities;
+    if (!m_doc->getAllEntities(&entities, false)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("getAllEntities() failed"));
+    }
+    Plug_Entity *found = nullptr;
+    for (Plug_Entity *entity : entities) {
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        if (!isUndone(entity) && data.value(DPI::EID).toULongLong() == wanted) {
+            found = entity;
+            break;
+        }
+    }
+    if (!found) {
+        qDeleteAll(entities);
+        throw RequestError(QStringLiteral("not_found"),
+                           QStringLiteral("no entity with id %1 in the "
+                                          "drawing").arg(wanted));
+    }
+    entities.removeOne(found);
+    qDeleteAll(entities);
+    return entityRow(found);
 }
 
 } // namespace lcbridge
