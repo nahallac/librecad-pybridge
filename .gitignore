@@ -8,3 +8,4 @@ Makefile.lc_pybridge
 python/dist/
 __pycache__/
 testhome/
+.claude/worktrees/

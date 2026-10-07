@@ -10,6 +10,8 @@
 
 #include "document_interface.h"
 
+#include <QFileInfo>
+#include <QImageWriter>
 #include <QJsonArray>
 #include <QList>
 #include <QPointF>
@@ -597,6 +599,18 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("point_inside"), &Dispatcher::opPointInside},
         {QStringLiteral("entity_id"), &Dispatcher::opEntityId},
         {QStringLiteral("find_entity"), &Dispatcher::opFindEntity},
+        {QStringLiteral("zoom_auto"),            &Dispatcher::opZoomAuto},
+        {QStringLiteral("zoom_window"),          &Dispatcher::opZoomWindow},
+        {QStringLiteral("zoom_in"),              &Dispatcher::opZoomIn},
+        {QStringLiteral("zoom_out"),             &Dispatcher::opZoomOut},
+        {QStringLiteral("zoom_pan"),             &Dispatcher::opZoomPan},
+        {QStringLiteral("zoom_previous"),        &Dispatcher::opZoomPrevious},
+        {QStringLiteral("zoom_page"),            &Dispatcher::opZoomPage},
+        {QStringLiteral("get_view"),             &Dispatcher::opGetView},
+        {QStringLiteral("set_view"),             &Dispatcher::opSetView},
+        {QStringLiteral("list_documents"),       &Dispatcher::opListDocuments},
+        {QStringLiteral("export_image"),         &Dispatcher::opExportImage},
+        {QStringLiteral("export_pdf"),           &Dispatcher::opExportPdf},
     };
     return table;
 }
@@ -628,6 +642,13 @@ const QSet<QString> &Dispatcher::readOnlyOperations()
         QStringLiteral("point_inside"),
         QStringLiteral("entity_id"),
         QStringLiteral("find_entity"),
+        // The view is not the drawing: none of these add to the undo stack.
+        QStringLiteral("zoom_auto"),       QStringLiteral("zoom_window"),
+        QStringLiteral("zoom_in"),         QStringLiteral("zoom_out"),
+        QStringLiteral("zoom_pan"),        QStringLiteral("zoom_previous"),
+        QStringLiteral("zoom_page"),       QStringLiteral("get_view"),
+        QStringLiteral("set_view"),        QStringLiteral("list_documents"),
+        QStringLiteral("export_image"),    QStringLiteral("export_pdf"),
     };
     return table;
 }
@@ -2189,6 +2210,215 @@ QJsonValue Dispatcher::opFindEntity(const QJsonObject &args)
     entities.removeOne(found);
     qDeleteAll(entities);
     return entityRow(found);
+}
+
+// View control, document windows, export. All read-only for undo: they move
+// the view or write files, never entities. activate_document and file_close
+// end the session and live in BridgeServer.
+// --------------------------------------------------------------------------
+
+void Dispatcher::requireView() const
+{
+    if (!m_native || !m_native->viewAvailable())
+        nativeUnavailable();
+}
+
+QJsonValue Dispatcher::opGetView(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireView();
+    NativeBridge::ViewState state;
+    if (!m_native->viewState(&state))
+        throw RequestError(QStringLiteral("failed"), QStringLiteral("no view"));
+    QJsonObject result;
+    // A single number while the axes agree, which is always unless
+    // zoom_auto/zoom_window ran with keep_aspect false.
+    result.insert(QStringLiteral("factor"), state.factorX);
+    if (state.factorY != state.factorX) {
+        QJsonArray factors{state.factorX, state.factorY};
+        result.insert(QStringLiteral("factor_xy"), factors);
+    }
+    result.insert(QStringLiteral("offset"), QJsonArray{state.offsetX, state.offsetY});
+    result.insert(QStringLiteral("size"), QJsonArray{state.width, state.height});
+    result.insert(QStringLiteral("visible"), bboxJson(state.min, state.max));
+    result.insert(QStringLiteral("center"),
+                  pointJson((state.min + state.max) / 2.0));
+    return result;
+}
+
+QJsonValue Dispatcher::opZoomAuto(const QJsonObject &args)
+{
+    requireView();
+    m_native->zoomAuto(optionalBool(args, QStringLiteral("keep_aspect"), true));
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opZoomWindow(const QJsonObject &args)
+{
+    requireView();
+    const QPointF p1 = requirePoint(args, QStringLiteral("p1"));
+    const QPointF p2 = requirePoint(args, QStringLiteral("p2"));
+    if (qFuzzyCompare(p1.x(), p2.x()) && qFuzzyCompare(p1.y(), p2.y()))
+        badArgs(QStringLiteral("\"p1\" and \"p2\" must differ"));
+    m_native->zoomWindow(p1, p2, optionalBool(args, QStringLiteral("keep_aspect"), true));
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::zoomBy(const QJsonObject &args, bool out)
+{
+    requireView();
+    // LibreCAD's zoom-in/out actions step by 1.137 (RS_ActionZoomIn).
+    const double factor = optionalNumber(args, QStringLiteral("factor"), 1.137);
+    if (!(factor > 1e-6))
+        badArgs(QStringLiteral("\"factor\" must be positive"));
+    const bool hasCenter = args.contains(QStringLiteral("center"))
+                           && !args.value(QStringLiteral("center")).isNull();
+    const QPointF center = hasCenter ? requirePoint(args, QStringLiteral("center"))
+                                     : QPointF();
+    m_native->zoomIn(factor, hasCenter, center, out);
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opZoomIn(const QJsonObject &args)
+{
+    return zoomBy(args, false);
+}
+
+QJsonValue Dispatcher::opZoomOut(const QJsonObject &args)
+{
+    return zoomBy(args, true);
+}
+
+QJsonValue Dispatcher::opZoomPan(const QJsonObject &args)
+{
+    requireView();
+    const double dx = requireNumber(args, QStringLiteral("dx"));
+    const double dy = requireNumber(args, QStringLiteral("dy"));
+    m_native->zoomPan(qRound(dx), qRound(dy));
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opZoomPrevious(const QJsonObject &args)
+{
+    requireView();
+    m_native->zoomPrevious();
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opZoomPage(const QJsonObject &args)
+{
+    requireView();
+    m_native->zoomPage();
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opSetView(const QJsonObject &args)
+{
+    requireView();
+    const bool hasFactor = args.contains(QStringLiteral("factor"));
+    const double factor = optionalNumber(args, QStringLiteral("factor"), 1.0);
+    if (hasFactor && !(factor > 1e-9))
+        badArgs(QStringLiteral("\"factor\" must be positive"));
+    const bool hasOffset = args.contains(QStringLiteral("offset"));
+    const bool hasCenter = args.contains(QStringLiteral("center"));
+    if (hasOffset && hasCenter)
+        badArgs(QStringLiteral("pass \"offset\" or \"center\", not both"));
+    if (!hasFactor && !hasOffset && !hasCenter)
+        badArgs(QStringLiteral("pass \"factor\", \"offset\" or \"center\""));
+    const QPointF offset = hasOffset ? requirePoint(args, QStringLiteral("offset"))
+                                     : QPointF();
+    const QPointF center = hasCenter ? requirePoint(args, QStringLiteral("center"))
+                                     : QPointF();
+    m_native->setView(hasFactor, factor, hasOffset, qRound(offset.x()),
+                      qRound(offset.y()), hasCenter, center);
+    return opGetView(args);
+}
+
+QJsonValue Dispatcher::opListDocuments(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    requireModification();
+    QList<DocumentWindow> windows;
+    if (!documentWindows(&windows)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("cannot read the document windows"));
+    }
+    QJsonArray rows;
+    for (const DocumentWindow &window : windows) {
+        QJsonObject row;
+        row.insert(QStringLiteral("index"), window.index);
+        row.insert(QStringLiteral("path"), window.path);
+        row.insert(QStringLiteral("title"), window.title);
+        row.insert(QStringLiteral("modified"), window.modified);
+        row.insert(QStringLiteral("active"), window.active);
+        row.insert(QStringLiteral("parent"), window.parent >= 0
+                                                 ? QJsonValue(window.parent)
+                                                 : QJsonValue());
+        rows.append(row);
+    }
+    return rows;
+}
+
+QJsonValue Dispatcher::opExportImage(const QJsonObject &args)
+{
+    requireModification();
+    const QString path = requireString(args, QStringLiteral("path"));
+    const double width = requireNumber(args, QStringLiteral("width"));
+    const double height = requireNumber(args, QStringLiteral("height"));
+    if (width < 1 || height < 1 || width > 32768 || height > 32768)
+        badArgs(QStringLiteral("\"width\" and \"height\" must be 1..32768 pixels"));
+    QString format = optionalString(args, QStringLiteral("format"),
+                                    QFileInfo(path).suffix()).toLower();
+    if (format == QLatin1String("jpeg"))
+        format = QStringLiteral("jpg");
+    const bool svg = format == QLatin1String("svg");
+    if (!svg && !QImageWriter::supportedImageFormats().contains(format.toLatin1())) {
+        badArgs(QStringLiteral("unsupported image format \"%1\" (by extension or "
+                               "\"format\"): png, jpg, bmp, svg, ...").arg(format));
+    }
+    const int border = static_cast<int>(optionalNumber(args, QStringLiteral("border"), 0));
+    if (border < 0 || 2 * border >= qMin(width, height))
+        badArgs(QStringLiteral("\"border\" must be >= 0 and leave room to draw"));
+    const QString background = optionalString(args, QStringLiteral("background"),
+                                              QStringLiteral("white"));
+    if (background != QLatin1String("white") && background != QLatin1String("black"))
+        badArgs(QStringLiteral("\"background\" must be \"white\" or \"black\""));
+    const bool blackWhite = optionalBool(args, QStringLiteral("black_white"), false);
+    const bool transparent = optionalBool(args, QStringLiteral("transparent"), false);
+    if (transparent && (svg || background == QLatin1String("black") || blackWhite))
+        badArgs(QStringLiteral("\"transparent\" works for raster formats on the "
+                               "default white background only"));
+    if (!m_native->exportImage(path, format, QSize(int(width), int(height)), border,
+                               background == QLatin1String("black"), blackWhite,
+                               transparent)) {
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    }
+    QJsonObject result;
+    result.insert(QStringLiteral("path"), QFileInfo(path).absoluteFilePath());
+    result.insert(QStringLiteral("format"), format);
+    result.insert(QStringLiteral("size"), QJsonArray{int(width), int(height)});
+    return result;
+}
+
+QJsonValue Dispatcher::opExportPdf(const QJsonObject &args)
+{
+    requireModification();
+    const QString path = requireString(args, QStringLiteral("path"));
+    const QString paper = optionalString(args, QStringLiteral("paper"), QString());
+    const int landscape = args.contains(QStringLiteral("landscape"))
+        ? (optionalBool(args, QStringLiteral("landscape"), false) ? 1 : 0)
+        : -1;
+    const bool fit = optionalBool(args, QStringLiteral("fit_to_page"), true);
+    int pages = 0;
+    QSizeF paperMm;
+    if (!m_native->exportPdf(path, paper, landscape, fit, &pages, &paperMm))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    QJsonObject result;
+    result.insert(QStringLiteral("path"), QFileInfo(path).absoluteFilePath());
+    result.insert(QStringLiteral("pages"), pages);
+    result.insert(QStringLiteral("paper_mm"),
+                  QJsonArray{paperMm.width(), paperMm.height()});
+    return result;
 }
 
 } // namespace lcbridge

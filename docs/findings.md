@@ -125,6 +125,41 @@ On top of those, `lc_bridge_native.cpp` implements:
   window exists, so its constructor polls every 100 ms until `hasActiveDocument()` (app window
   with a document) and then triggers the same `QAction`. The session-ended `QMessageBox` becomes
   a status-bar message in that mode: nothing would dismiss a modal box in an unattended run.
+- View, document windows, export (2026-10-06, verified live headless the same day: 45 checks
+  covering every op below, PNG dimensions read back from IHDR, SVG/JPEG/PDF magic, renders
+  inspected).
+  - Zoom: `RS_GraphicView::zoom*` are virtual (no symbols); `getFactor`/`getOffsetX/Y`/
+    `toGraphX/Y`/`setFactor` are exported non-virtuals. LibreCAD's zoom-in step is 1.137
+    (`RS_ActionZoomIn`); `zoomIn()` with no centre zooms about the *mouse position*, meaningless
+    to a script, so the bridge passes the view centre. Two quirks: `saveView()` (called by
+    `zoomAuto`/`zoomWindow`) sets the drawing **modified** -- zooming makes a drawing "unsaved" --
+    and records at most one view per 500 ms, so `zoom_previous` after rapid zooms goes back
+    further than expected. Headless, the offscreen view is 428x800 pixels.
+  - Windows: `QMdiArea::subWindowList()` from the exported `getMdiArea()`, filtered by class
+    name. Activation is `setActiveSubWindow()`, whose `subWindowActivated` signal LibreCAD wires
+    to `slotWindowActivated(QMdiSubWindow*)`; that is enough for `getMDIWindow()` (and so
+    `execPlug()`) to follow, headless too. Closing is `QWidget::close()` on the `QC_MDIWindow`
+    (`slotFileClose` is not exported): its `closeEvent` asks about unsaved changes in a modal
+    dialog, so the server refuses unless `discard`, and `discard` clears `RS_Document`'s inline
+    modified flag right before closing. `doClose()` then activates the last remaining window.
+  - **`RS_Document` sets its modified flag only when an undo cycle closes** (`endUndoCycle()`
+    when `hasUndoable()`), so inside a session the flag lags: `list_documents` and the close
+    check count `hasUndoable()` (virtual) as well. The same rule made a save inside the session
+    useless: the flag came back on when `execPlug()` closed the cycle. `file_save`/`file_save_as`
+    therefore checkpoint first now.
+  - Export: `slotFileExport(name, format, size, borders, black, bw)` (exported; no transparency
+    parameter in 2.2.1.5) renders through `RS_PainterQt` + `RS_StaticGraphicView::zoomAuto` --
+    always the whole drawing -- and **returns false for SVG even on success** (its result flag
+    is only set in the raster branch), so SVG success is judged by the file. Transparent PNGs and
+    PDFs use the same two classes directly; their destructors are inline (defaulted/implicit)
+    and would store vtable pointers -- data symbols -- so the plugin heap-allocates both and
+    deletes through a base pointer laundered past the optimiser (`opaque()`), keeping the call
+    virtual. `slotFilePrint(true)` insists on print preview and a file dialog, so `export_pdf`
+    replicates its body: `QPrinter` PDF at 1200 dpi, full-page layout from the drawing's paper
+    and margins (`QT += printsupport`), either fitted or at the paper scale and insertion base
+    with page tiling.
+  - Testing gotcha: a fresh `$HOME` makes LibreCAD show `QG_DlgInitial` (`Startup/FirstLoad`)
+    before the main window, which blocks a headless launch; seed `LibreCAD.conf` first.
 
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session

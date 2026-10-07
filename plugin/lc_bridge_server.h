@@ -49,6 +49,19 @@ class NativeBridge;
  *                           session on it. Session-level because the
  *                           Document_Interface cannot follow a change of
  *                           document (findings risk 7).
+ *   {"op": "activate_document", "args": {"index": n} or {"path": ...}}
+ *                       ->  {"ok": true, "result": {"index", "path",
+ *                           "restart": bool}}; with restart true the server
+ *                           stops and the plugin switches LibreCAD to that
+ *                           window and starts a new session there. false
+ *                           when it already is the session's window.
+ *   {"op": "file_close", "args": {"discard": bool}}
+ *                       ->  {"ok": true, "result": {"remaining": n}}, then
+ *                           the server stops; the plugin closes the window
+ *                           and, if n > 0, starts a new session on the window
+ *                           LibreCAD activates. Refused with bad_request when
+ *                           the drawing has unsaved changes and discard is
+ *                           not set: LibreCAD would ask in a modal dialog.
  *
  * One client at a time; a second connection is sent an error line and closed.
  * A client disconnect does not stop the server -- the session ends on
@@ -104,6 +117,12 @@ private:
     void sendToClient(const QByteArray &line);
 
     QJsonObject sessionRequest(const QJsonObject &request, bool *stopAfter);
+    //! activate_document / file_close. Return an error response, or an empty
+    //! object with \a result filled in.
+    QJsonObject activateDocument(const QJsonObject &args, QJsonValue *result,
+                                 bool *stopAfter);
+    QJsonObject closeDocument(const QJsonObject &args, QJsonValue *result,
+                              bool *stopAfter);
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

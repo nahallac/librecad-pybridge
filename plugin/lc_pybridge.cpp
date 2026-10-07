@@ -211,16 +211,32 @@ void LC_PyBridge::runBridgeSession(Document_Interface *doc, QWidget *parent)
         return;
     }
 
-    // The session ended on file_open/file_new. Once execComm() has returned
-    // and execPlug() has closed its undo section, open the drawing and start
-    // a new session on it by triggering this plugin's own menu action --
-    // LibreCAD parents that QAction to the plugin, so it is a child here.
+    // The session ended on file_open/file_new/activate_document/file_close.
+    // Once execComm() has returned and execPlug() has closed its undo
+    // section, carry that out and start a new session on the now-active
+    // window by triggering this plugin's own menu action -- LibreCAD parents
+    // that QAction to the plugin, so it is a child here.
     QTimer::singleShot(0, this, [this, parent, restart]() {
         QString error;
         if (!lcbridge::performSessionRestart(restart, &error)) {
-            QMessageBox::warning(parent, tr(kPluginTitle),
-                                 tr("Could not restart the bridge session:\n%1")
-                                     .arg(error));
+            auto *mainWindow = qobject_cast<QMainWindow *>(parent);
+            if (autoStartRequested() && mainWindow) {
+                mainWindow->statusBar()->showMessage(
+                    tr("Could not restart the bridge session: %1").arg(error));
+            } else {
+                QMessageBox::warning(parent, tr(kPluginTitle),
+                                     tr("Could not restart the bridge session:\n%1")
+                                         .arg(error));
+            }
+            return;
+        }
+        // Closing the last window leaves nothing to serve; the client was
+        // told so ("remaining": 0) and does not wait for a session.
+        if (restart.kind == lcbridge::SessionRestart::CloseWindow
+            && !lcbridge::hasActiveDocument()) {
+            if (auto *mainWindow = qobject_cast<QMainWindow *>(parent))
+                mainWindow->statusBar()->showMessage(
+                    tr("Bridge session ended: the last drawing was closed."), 5000);
             return;
         }
         if (triggerMenuAction())

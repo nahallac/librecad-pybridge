@@ -162,13 +162,40 @@ doc.open("/path/to/other.dxf")          # new window, new session, same Document
 doc.new()
 ```
 
-A session is one undo step unless you checkpoint it; `undo()`/`redo()` work on whole steps, and
+A session is one undo step unless you checkpoint it (saving checkpoints too, so a saved drawing
+stays saved when the session ends); `undo()`/`redo()` work on whole steps, and
 queries in between do not discard redo history. `open()` and `new()` are different from the rest:
 a session is bound to one drawing (see the architecture note below), so they end the session,
 have LibreCAD open the drawing in a new window and start a fresh session on it, and reconnect.
 Every `Entity` from before is stale afterwards; the `Document` object carries over. If LibreCAD
 shows a dialog during the open (an unreadable file, say), the restart waits for it and the client
 times out.
+
+**View, documents, export:**
+
+```python
+doc.zoom_auto()                          # each zoom returns doc.view():
+doc.zoom_window((0, 0), (2000, 1500))    # {"factor", "offset", "size", "visible", "center"}
+doc.zoom_in(2.0, center=(500, 500)); doc.zoom_out(); doc.zoom_pan(100, 0)
+doc.set_view(factor=0.5, center=(1000, 750))
+doc.documents()                          # [{"index", "path", "active", "modified", ...}]
+doc.activate_document("/path/to/b.dxf")  # or an index; new session on that window
+doc.close_document(discard=True)         # {"remaining": n}
+doc.export_image("/tmp/plan.png", 1600, 1200, border=20)    # png/jpg/bmp/svg by extension
+doc.export_pdf("/tmp/plan.pdf", paper="A3", landscape=True)  # fitted onto one page
+```
+
+Zooms move the view only, not the undo stack — but LibreCAD flags the drawing modified when the
+view changes (the view is saved with it). `activate_document()` and `close_document()` are
+session-level like `open()`: the session ends and the client reconnects to a new one on the window
+that is then active. `close_document()` refuses a drawing with unsaved changes unless
+`discard=True` (LibreCAD would ask in a dialog); closing the last drawing leaves the `Document`
+disconnected (`doc.connected` is False, further calls raise `BridgeError("disconnected")`).
+Exports always show the whole drawing, not the current view: `export_image()` is File > Export's
+renderer (`background="black"`, `black_white=True`, or `transparent=True` for raster formats);
+`export_pdf()` is File > Export as PDF without its dialogs, on the drawing's paper and margins
+unless `paper=` names one, fitted to the page unless `fit_to_page=False` (then the drawing's
+paper scale and insertion base apply, as LibreCAD's own print does).
 
 `python/examples/native_demo.py` draws a hatched, dimensioned plate through all of this. See
 `docs/findings.md`, "Native access", for how it works and what it depends on.
@@ -301,6 +328,9 @@ Conventions, uniform across every operation:
 | Layer state* | `get_layer_state` (`layer_state`), `get_layer_states` (`layer_states`), `set_layer_state`, `rename_layer` |
 | Blocks* | `block_define` (`define_block`), `block_rename` (`rename_block`), `block_remove` (`remove_block`), `block_entities`; `get_blocks` also stops listing removed blocks |
 | Geometry queries* | `entity_length` (`length`), `entity_area` (`area`), `intersections`, `nearest_entity`, `nearest_point`, `point_inside` (`contains`), `entity_id` (`id`), `find_entity` |
+| View* | `get_view` (`view`), `zoom_auto`, `zoom_window`, `zoom_in`, `zoom_out`, `zoom_pan`, `zoom_previous`, `zoom_page`, `set_view` |
+| Documents* | `list_documents` (`documents`); server-level: `activate_document`, `file_close` (`close_document`) |
+| Export* | `export_image`, `export_pdf` |
 
 \* native layer; `unavailable` on a version mismatch or the stub.
 
@@ -314,7 +344,8 @@ cancels whatever action the user had in progress, so they need a design of their
 ```
 plugin/
   lc_pybridge.{h,cpp}        plugin entry point, menu action, auto-start,
-                             session restart after file_open/file_new
+                             session restart after file_open/file_new/
+                             activate_document/file_close
   lc_bridge_dispatch.{h,cpp} the operation table over Document_Interface
                              and the native layer
   lc_bridge_native.{h,cpp}   the native layer: command line, selection,
@@ -364,7 +395,9 @@ doc = Document.launch("some.dxf", headless=True)   # or headless=False to watch
 doc.shutdown(); doc.process.terminate()
 ```
 
-`python/examples/native_demo.py` is the live check for dimensions and hatches.
+`python/examples/native_demo.py` is the live check for dimensions and hatches. Against a fresh,
+isolated `$HOME`, write `[Startup]` / `FirstLoad=0` to `~/.config/LibreCAD/LibreCAD.conf` first:
+otherwise LibreCAD's first-run dialog blocks the headless start and `launch()` times out.
 
 ## What comes next
 
@@ -374,8 +407,6 @@ Still missing, roughly in order of value:
   fillet (round), chamfer (bevel), cut, bulk attribute change, revert direction.
 - Creation gaps: `add_mtext` (the plugin API has `addMText`, unwrapped), `add_image`, the other
   dimension kinds (radial, diametric, angular, leader) through the command line.
-- View and windows: zoom, visible area, `file_close`, listing and switching documents (every
-  `open()` leaves its window behind), export to PDF/SVG.
 - Queries across sessions: entity ids are per process (they are not stored in the file).
 - The interactive prompts as explicit blocking operations, and push events (selection changed,
   document modified) for live sync.

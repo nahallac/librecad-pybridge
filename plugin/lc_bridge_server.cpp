@@ -190,7 +190,9 @@ void BridgeServer::processLine(const QByteArray &line)
         const QJsonObject request = document.object();
         const QString op = request.value(QStringLiteral("op")).toString();
         if (op == QLatin1String("shutdown") || op == QLatin1String("session")
-            || op == QLatin1String("file_open") || op == QLatin1String("file_new")) {
+            || op == QLatin1String("file_open") || op == QLatin1String("file_new")
+            || op == QLatin1String("activate_document")
+            || op == QLatin1String("file_close")) {
             // Session-level: acknowledged before the loop is told to quit, so
             // the client sees the reply.
             response = sessionRequest(request, &shutdown);
@@ -246,6 +248,10 @@ QJsonObject BridgeServer::sessionRequest(const QJsonObject &request, bool *stopA
             result = out;
             *stopAfter = true;
         }
+    } else if (op == QLatin1String("activate_document")) {
+        response = activateDocument(args, &result, stopAfter);
+    } else if (op == QLatin1String("file_close")) {
+        response = closeDocument(args, &result, stopAfter);
     } else {   // file_new
         m_pendingRestart.kind = SessionRestart::NewDrawing;
         m_pendingRestart.path.clear();
@@ -259,6 +265,107 @@ QJsonObject BridgeServer::sessionRequest(const QJsonObject &request, bool *stopA
     if (request.contains(QStringLiteral("id")))
         response.insert(QStringLiteral("id"), request.value(QStringLiteral("id")));
     return response;
+}
+
+QJsonObject BridgeServer::activateDocument(const QJsonObject &args,
+                                           QJsonValue *result, bool *stopAfter)
+{
+    const QJsonValue indexValue = args.value(QStringLiteral("index"));
+    const QJsonValue pathValue = args.value(QStringLiteral("path"));
+    const bool byIndex = indexValue.isDouble();
+    const bool byPath = pathValue.isString() && !pathValue.toString().isEmpty();
+    if (byIndex == byPath) {
+        return errorResponse(QStringLiteral("bad_args"),
+                             QStringLiteral("pass \"index\" (a number) or "
+                                            "\"path\" (a string)"));
+    }
+    QList<DocumentWindow> windows;
+    if (!documentWindows(&windows)) {
+        return errorResponse(QStringLiteral("failed"),
+                             QStringLiteral("cannot read the document windows"));
+    }
+    const DocumentWindow *target = nullptr;
+    const QString wanted = byPath ? QFileInfo(pathValue.toString()).absoluteFilePath()
+                                  : QString();
+    for (const DocumentWindow &window : windows) {
+        if (byIndex && window.index == indexValue.toInt()) {
+            target = &window;
+            break;
+        }
+        // A drawing window, not the block editors and previews that share
+        // its document's file name. A file can be open in several windows;
+        // the session's own one wins, otherwise the first.
+        if (byPath && window.parent < 0 && !window.path.isEmpty()
+            && QFileInfo(window.path).absoluteFilePath() == wanted
+            && (!target || window.active)) {
+            target = &window;
+        }
+    }
+    if (!target) {
+        return errorResponse(QStringLiteral("not_found"),
+                             byIndex ? QStringLiteral("no document window %1")
+                                           .arg(indexValue.toInt())
+                                     : QStringLiteral("no open document \"%1\"")
+                                           .arg(wanted));
+    }
+    QJsonObject out;
+    out.insert(QStringLiteral("index"), target->index);
+    out.insert(QStringLiteral("path"), target->path);
+    out.insert(QStringLiteral("restart"), !target->active);
+    *result = out;
+    if (!target->active) {
+        m_pendingRestart.kind = SessionRestart::ActivateWindow;
+        m_pendingRestart.index = target->index;
+        m_pendingRestart.path = target->path;
+        *stopAfter = true;
+    }
+    return QJsonObject();
+}
+
+QJsonObject BridgeServer::closeDocument(const QJsonObject &args,
+                                        QJsonValue *result, bool *stopAfter)
+{
+    const QJsonValue discardValue = args.value(QStringLiteral("discard"));
+    if (!discardValue.isUndefined() && !discardValue.isNull() && !discardValue.isBool()) {
+        return errorResponse(QStringLiteral("bad_args"),
+                             QStringLiteral("\"discard\" must be a boolean"));
+    }
+    const bool discard = discardValue.toBool(false);
+    // Refuse here rather than let QC_MDIWindow::closeEvent put up its modal
+    // save/discard question, which would hang an unattended run.
+    if (!discard && m_native->hasUnsavedChanges()) {
+        return errorResponse(QStringLiteral("bad_request"),
+                             QStringLiteral("unsaved changes; pass discard=True "
+                                            "or save first"));
+    }
+    QList<DocumentWindow> windows;
+    if (!documentWindows(&windows)) {
+        return errorResponse(QStringLiteral("failed"),
+                             QStringLiteral("cannot read the document windows"));
+    }
+    int active = -1;
+    for (const DocumentWindow &window : windows) {
+        if (window.active)
+            active = window.index;
+    }
+    if (active < 0) {
+        return errorResponse(QStringLiteral("failed"),
+                             QStringLiteral("no active document window"));
+    }
+    // Closing a drawing closes its block editors and print previews too.
+    int remaining = 0;
+    for (const DocumentWindow &window : windows) {
+        if (window.index != active && window.parent != active)
+            ++remaining;
+    }
+    QJsonObject out;
+    out.insert(QStringLiteral("remaining"), remaining);
+    *result = out;
+    m_pendingRestart.kind = SessionRestart::CloseWindow;
+    m_pendingRestart.discard = discard;
+    m_pendingRestart.path.clear();
+    *stopAfter = true;
+    return QJsonObject();
 }
 
 void BridgeServer::sendToClient(const QByteArray &line)

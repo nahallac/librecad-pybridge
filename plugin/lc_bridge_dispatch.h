@@ -184,6 +184,22 @@ private:
     QJsonValue opPointInside(const QJsonObject &args);
     QJsonValue opEntityId(const QJsonObject &args);
     QJsonValue opFindEntity(const QJsonObject &args);
+    // View control, document windows, export (roadmap item 4). Switching
+    // and closing documents end the session, so those are in BridgeServer.
+    QJsonValue opZoomAuto(const QJsonObject &args);
+    QJsonValue opZoomWindow(const QJsonObject &args);
+    QJsonValue opZoomIn(const QJsonObject &args);
+    QJsonValue opZoomOut(const QJsonObject &args);
+    QJsonValue opZoomPan(const QJsonObject &args);
+    QJsonValue opZoomPrevious(const QJsonObject &args);
+    QJsonValue opZoomPage(const QJsonObject &args);
+    QJsonValue opGetView(const QJsonObject &args);
+    QJsonValue opSetView(const QJsonObject &args);
+    QJsonValue opListDocuments(const QJsonObject &args);
+    QJsonValue opExportImage(const QJsonObject &args);
+    QJsonValue opExportPdf(const QJsonObject &args);
+    void requireView() const;
+    QJsonValue zoomBy(const QJsonObject &args, bool out);
 
     //! Entities of \a dpiType currently in the drawing.
     int countEntitiesOfType(int dpiType);

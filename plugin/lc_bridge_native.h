@@ -35,6 +35,8 @@
 #include <QList>
 #include <QObject>
 #include <QPointF>
+#include <QSize>
+#include <QSizeF>
 #include <QString>
 #include <QStringList>
 
@@ -56,10 +58,31 @@ namespace lcbridge {
 //! (findings risk 7), so a different drawing means a different session.
 struct SessionRestart
 {
-    enum Kind { None, OpenFile, NewDrawing };
+    enum Kind { None, OpenFile, NewDrawing, ActivateWindow, CloseWindow };
     Kind kind {None};
     QString path;
+    //! ActivateWindow: position in the MDI area's subWindowList().
+    int index {-1};
+    //! CloseWindow: drop unsaved changes instead of refusing.
+    bool discard {false};
 };
+
+//! One open document window, as list_documents reports it.
+struct DocumentWindow
+{
+    int index {-1};         //!< position in QMdiArea::subWindowList()
+    QString path;           //!< file name; empty for an unnamed drawing
+    QString title;          //!< the window title LibreCAD shows
+    bool modified {false};  //!< unsaved changes, including an open undo cycle
+    bool active {false};    //!< the window the current session serves
+    //! For a block editor or print preview, the index of the drawing window
+    //! it belongs to; -1 for a drawing.
+    int parent {-1};
+};
+
+//! Every document window of the application, in MDI order. False on a
+//! version mismatch or before the application window exists.
+bool documentWindows(QList<DocumentWindow> *windows);
 
 //! Carry out \a restart against the application window. Returns false (with
 //! \a error set) when the version check fails or LibreCAD refused. Static
@@ -259,6 +282,67 @@ public:
     //! Refused for anything else.
     Result pointInside(Plug_Entity *entity, const QPointF &point, bool *inside,
                        bool *onContour);
+
+    // ---- View control, document windows, export (roadmap item 4) --------
+    // All through the session's RS_GraphicView and the application window.
+    // None of it changes the drawing's entities, so the dispatcher treats
+    // these as read-only for undo; note that LibreCAD's zoom functions mark
+    // the drawing modified anyway (RS_GraphicView::saveView).
+
+    //! The graphic view is there and the version check passed.
+    bool viewAvailable() const;
+
+    //! What the view shows: zoom factor, pixel offset, size in pixels, and
+    //! the drawing-coordinate rectangle that is visible.
+    struct ViewState
+    {
+        double factorX {1.0};
+        double factorY {1.0};
+        int offsetX {0};
+        int offsetY {0};
+        int width {0};
+        int height {0};
+        QPointF min;
+        QPointF max;
+    };
+    bool viewState(ViewState *state) const;
+
+    bool zoomAuto(bool keepAspectRatio);
+    //! Show the drawing-coordinate rectangle p1-p2.
+    bool zoomWindow(const QPointF &p1, const QPointF &p2, bool keepAspectRatio);
+    //! Zoom by \a factor about \a center (drawing coordinates), or about the
+    //! middle of the view when \a hasCenter is false -- LibreCAD's own
+    //! default is the mouse position, which means nothing to a script.
+    bool zoomIn(double factor, bool hasCenter, const QPointF &center, bool out);
+    //! Shift the view by pixels; positive dy moves the drawing up.
+    bool zoomPan(int dx, int dy);
+    bool zoomPrevious();
+    bool zoomPage();
+    //! Set the factor and/or the offset directly; with \a hasCenter the
+    //! offset is computed so \a center (drawing coordinates) is in the middle
+    //! of the view.
+    bool setView(bool hasFactor, double factor, bool hasOffset, int offsetX,
+                 int offsetY, bool hasCenter, const QPointF &center);
+
+    //! True when the current document has changes not yet saved, counting
+    //! the session's open undo cycle (RS_Document only sets its modified flag
+    //! when a cycle closes).
+    bool hasUnsavedChanges() const;
+
+    //! Render the whole drawing to an image file, as File > Export does.
+    //! \a format is a QImageWriter format name or "svg".
+    //! \a transparent leaves the background transparent (raster formats only).
+    bool exportImage(const QString &path, const QString &format, const QSize &size,
+                     int border, bool blackBackground, bool blackWhite,
+                     bool transparent);
+    //! Print the drawing to a PDF file without the print dialog, the way
+    //! File > Export as PDF does. \a paper empty means the drawing's own
+    //! paper size; \a landscape < 0 means the drawing's (or portrait for an
+    //! explicit paper). \a fitToPage scales the drawing onto one page inside
+    //! the drawing's margins; otherwise the drawing's paper scale and
+    //! insertion base apply, over as many pages as it sets up.
+    bool exportPdf(const QString &path, const QString &paper, int landscape,
+                   bool fitToPage, int *pages, QSizeF *paperMm);
 
 private:
     void pollForHatchDialog();
