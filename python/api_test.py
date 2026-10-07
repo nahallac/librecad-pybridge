@@ -167,7 +167,11 @@ def main() -> int:
                          lambda: probe.selected,
                          lambda: probe.bbox(),
                          lambda: doc.bbox(),
-                         lambda: doc.entities(selected_only=True)):
+                         lambda: doc.entities(selected_only=True),
+                         lambda: doc.offset([probe], 5, (0, 0)),
+                         lambda: doc.mirror([probe], (0, 0), (1, 0)),
+                         lambda: doc.explode([probe]),
+                         lambda: doc.trim(probe, (0, 0), probe, (1, 1))):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

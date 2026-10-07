@@ -833,6 +833,78 @@ class Document:
             return None
         return (tuple(box["min"]), tuple(box["max"]))
 
+    # -- engine modifications (the modify tools, via RS_Modification) ---------
+    #
+    # Each returns the entities it created. Entities the engine replaced are
+    # marked stale here, exactly like update()/remove() do.
+
+    def _rows(self, rows: list[dict[str, Any]]) -> list[Entity]:
+        return [Entity(self, row["handle"], row["type"], row.get("data"))
+                for row in rows]
+
+    @staticmethod
+    def _retire(entities: list["Entity"]) -> None:
+        for entity in entities:
+            entity._stale = True
+
+    def offset(self, entities: list["Entity"], distance: float, side: Any,
+               count: int = 1, keep_original: bool = True,
+               use_current_layer: bool = False,
+               use_current_attributes: bool = False) -> list[Entity]:
+        """Parallel copies of ``entities`` at ``distance``, toward ``side``.
+
+        ``side`` is any point on the side to offset toward. ``count`` copies
+        are made at 1x, 2x, ... the distance. With ``keep_original`` False
+        the originals are replaced by one offset copy (and become stale).
+        """
+        rows = self._call_now(
+            "mod_offset", handles=[e._handle for e in entities],
+            distance=float(distance), side=_pt(side), count=int(count),
+            keep_original=keep_original, use_current_layer=use_current_layer,
+            use_current_attributes=use_current_attributes)
+        if not keep_original:
+            self._retire(entities)
+        return self._rows(rows)
+
+    def mirror(self, entities: list["Entity"], axis_p1: Any, axis_p2: Any,
+               copy: bool = False) -> list[Entity]:
+        """Mirror ``entities`` across the line axis_p1-axis_p2.
+
+        ``copy`` keeps the originals; otherwise they are replaced (stale).
+        """
+        rows = self._call_now(
+            "mod_mirror", handles=[e._handle for e in entities],
+            axis_p1=_pt(axis_p1), axis_p2=_pt(axis_p2), copy=copy)
+        if not copy:
+            self._retire(entities)
+        return self._rows(rows)
+
+    def explode(self, entities: list["Entity"],
+                remove: bool = True) -> list[Entity]:
+        """Replace containers (polylines, inserts, dimensions, hatches, text)
+        with their member entities. ``remove`` drops the originals (stale)."""
+        rows = self._call_now(
+            "mod_explode", handles=[e._handle for e in entities], remove=remove)
+        if remove:
+            self._retire(entities)
+        return self._rows(rows)
+
+    def trim(self, entity: "Entity", trim_point: Any, limit: "Entity",
+             limit_point: Any, both: bool = False) -> list[Entity]:
+        """Trim ``entity`` (line, arc, circle, ellipse) against ``limit``.
+
+        ``trim_point`` lies on the part of ``entity`` to keep; ``limit_point``
+        picks the intersection when there are several. ``both`` trims
+        ``limit`` as well. The trimmed entities are replaced and become
+        stale; the replacements are returned.
+        """
+        rows = self._call_now(
+            "mod_trim", handle=entity._handle, trim_point=_pt(trim_point),
+            limit_handle=limit._handle, limit_point=_pt(limit_point),
+            both=both)
+        self._retire([entity, limit] if both else [entity])
+        return self._rows(rows)
+
     def cad_dim(self, kind: str, p1: Any, p2: Any, dimline: Any) -> None:
         """A real DIMENSION entity via LibreCAD's own dimension action.
 

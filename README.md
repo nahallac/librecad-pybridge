@@ -116,6 +116,19 @@ The same access reads what the plugin API will not say: `entity.selected`, `enti
 `doc.bbox()` (union over given entities or the whole drawing), and
 `doc.entities(selected_only=True)` — the current selection, straight from the engine.
 
+And the modify tools themselves, run through the engine class behind them (`RS_Modification`),
+not the command line: `doc.offset(entities, distance, side)`, `doc.mirror(entities, p1, p2,
+copy=False)`, `doc.explode(entities)`, and `doc.trim(entity, trim_point, limit, limit_point,
+both=False)`. Each returns the entities it created; entities the engine replaced (trimmed lines,
+exploded polylines, mirrored or offset originals when not kept) go stale like after `update()`.
+
+```python
+wall = doc.entities(types=["LINE"])[0]
+inner, = doc.offset([wall], 150, side=(0, 0))      # one parallel line, toward the origin
+doc.mirror([wall, inner], (2000, 0), (2000, 1), copy=True)
+kept, = doc.trim(wall, trim_point=(10, 0), limit=inner, limit_point=(500, 0))
+```
+
 `python/examples/native_demo.py` draws a hatched, dimensioned plate. See `docs/findings.md`,
 "Native access", for how this works and what it depends on.
 

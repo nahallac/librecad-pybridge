@@ -569,6 +569,10 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("entity_selected"),      &Dispatcher::opEntitySelected},
         {QStringLiteral("entity_bbox"),          &Dispatcher::opEntityBbox},
         {QStringLiteral("get_bbox"),             &Dispatcher::opGetBbox},
+        {QStringLiteral("mod_offset"),           &Dispatcher::opModOffset},
+        {QStringLiteral("mod_mirror"),           &Dispatcher::opModMirror},
+        {QStringLiteral("mod_explode"),          &Dispatcher::opModExplode},
+        {QStringLiteral("mod_trim"),             &Dispatcher::opModTrim},
         {QStringLiteral("cmd_dim"),              &Dispatcher::opCmdDim},
         {QStringLiteral("cmd_hatch"),            &Dispatcher::opCmdHatch},
     };
@@ -973,7 +977,7 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
         const int type = typeField == data.constEnd() ? DPI::UNKNOWN
                                                       : typeField->toInt();
 
-        if (!wanted.isEmpty() && !wanted.contains(type)) {
+        if ((!wanted.isEmpty() && !wanted.contains(type)) || isUndone(entity)) {
             delete entity;
             continue;
         }
@@ -1241,6 +1245,80 @@ void Dispatcher::requireNativeEntityAccess() const
         nativeUnavailable();
 }
 
+void Dispatcher::requireModification() const
+{
+    if (!m_native || !m_native->modificationAvailable())
+        nativeUnavailable();
+}
+
+int Dispatcher::selectHandles(const QJsonArray &handles)
+{
+    selectAll(false);
+    int selected = 0;
+    for (int i = 0; i < handles.size(); ++i) {
+        if (!handles.at(i).isDouble())
+            badArgs(QStringLiteral("\"handles\"[%1] must be a number").arg(i));
+        QJsonObject lookup;
+        lookup.insert(QStringLiteral("handle"), handles.at(i));
+        if (m_native->setSelected(lookupEntity(lookup), true))
+            ++selected;
+    }
+    return selected;
+}
+
+bool Dispatcher::isUndone(Plug_Entity *entity) const
+{
+    bool undone = false;
+    return m_native && m_native->isUndone(entity, &undone) && undone;
+}
+
+QSet<const void *> Dispatcher::entityKeys()
+{
+    QSet<const void *> keys;
+    QList<Plug_Entity *> entities;
+    if (m_doc->getAllEntities(&entities, false)) {
+        for (Plug_Entity *entity : entities)
+            keys.insert(m_native->entityKey(entity));
+    }
+    qDeleteAll(entities);
+    return keys;
+}
+
+QJsonArray Dispatcher::newEntitiesSince(const QSet<const void *> &before)
+{
+    QJsonArray result;
+    QList<Plug_Entity *> entities;
+    if (!m_doc->getAllEntities(&entities, false))
+        return result;
+    for (Plug_Entity *entity : entities) {
+        if (!entity || before.contains(m_native->entityKey(entity))
+            || isUndone(entity)) {
+            delete entity;
+            continue;
+        }
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        const auto typeField = data.constFind(DPI::ETYPE);
+        const int type = typeField == data.constEnd() ? DPI::UNKNOWN
+                                                      : typeField->toInt();
+        QJsonObject item;
+        item.insert(QStringLiteral("handle"), registerEntity(entity));
+        item.insert(QStringLiteral("type"), typeToName(type));
+        item.insert(QStringLiteral("data"), entityDataToJson(type, data));
+        result.append(item);
+    }
+    return result;
+}
+
+void Dispatcher::invalidateHandles(const QJsonArray &handles)
+{
+    for (const QJsonValue &handle : handles) {
+        QJsonObject lookup;
+        lookup.insert(QStringLiteral("handle"), handle);
+        invalidateEntity(lookup);
+    }
+}
+
 namespace {
 
 QJsonArray pointJson(const QPointF &point)
@@ -1266,7 +1344,7 @@ int Dispatcher::countEntitiesOfType(int dpiType)
 
     int count = 0;
     for (Plug_Entity *entity : entities) {
-        if (readEntityType(entity) == dpiType)
+        if (readEntityType(entity) == dpiType && !isUndone(entity))
             ++count;
     }
     qDeleteAll(entities);
@@ -1281,7 +1359,7 @@ int Dispatcher::selectAll(bool selected)
 
     int touched = 0;
     for (Plug_Entity *entity : entities) {
-        if (m_native->setSelected(entity, selected))
+        if (!isUndone(entity) && m_native->setSelected(entity, selected))
             ++touched;
     }
     qDeleteAll(entities);
@@ -1389,7 +1467,7 @@ QJsonValue Dispatcher::opGetBbox(const QJsonObject &args)
     QPointF lo, hi;
     for (Plug_Entity *entity : entities) {
         QPointF min, max;
-        if (!m_native->boundingBox(entity, &min, &max))
+        if (isUndone(entity) || !m_native->boundingBox(entity, &min, &max))
             continue;
         if (!any) {
             lo = min;
@@ -1404,6 +1482,95 @@ QJsonValue Dispatcher::opGetBbox(const QJsonObject &args)
     if (!any)
         return QJsonValue();
     return bboxJson(lo, hi);
+}
+
+// Engine modifications. Each returns the entities the operation created, in
+// the get_entities row format, found by diffing the drawing's entity
+// identities before and after. Handles of entities the engine removed are
+// forgotten here so a later use reports "no such handle" rather than acting
+// on an undone entity.
+
+QJsonValue Dispatcher::opModOffset(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    const double distance = requireNumber(args, QStringLiteral("distance"));
+    const QPointF side = requirePoint(args, QStringLiteral("side"));
+    const int count = static_cast<int>(optionalNumber(args, QStringLiteral("count"), 1));
+    const bool keepOriginal = optionalBool(args, QStringLiteral("keep_original"), true);
+    const bool useCurrentLayer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool useCurrentAttributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    if (count < 1)
+        badArgs(QStringLiteral("\"count\" must be at least 1"));
+
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!m_native->offset(side, distance, count, keepOriginal,
+                          useCurrentLayer, useCurrentAttributes)) {
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    }
+    if (!keepOriginal)
+        invalidateHandles(handles);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModMirror(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    const QPointF p1 = requirePoint(args, QStringLiteral("axis_p1"));
+    const QPointF p2 = requirePoint(args, QStringLiteral("axis_p2"));
+    const bool copy = optionalBool(args, QStringLiteral("copy"), false);
+    if (p1 == p2)
+        badArgs(QStringLiteral("the mirror axis needs two distinct points"));
+
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!m_native->mirror(p1, p2, copy))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    if (!copy)
+        invalidateHandles(handles);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModExplode(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    const bool remove = optionalBool(args, QStringLiteral("remove"), true);
+
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!m_native->explode(remove))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    if (remove)
+        invalidateHandles(handles);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModTrim(const QJsonObject &args)
+{
+    requireModification();
+    Plug_Entity *toTrim = lookupEntity(args);
+    const QPointF trimPoint = requirePoint(args, QStringLiteral("trim_point"));
+    QJsonObject limitLookup;
+    limitLookup.insert(QStringLiteral("handle"),
+                       requireValue(args, QStringLiteral("limit_handle")));
+    Plug_Entity *limit = lookupEntity(limitLookup);
+    const QPointF limitPoint = requirePoint(args, QStringLiteral("limit_point"));
+    const bool both = optionalBool(args, QStringLiteral("both"), false);
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->trim(toTrim, trimPoint, limit, limitPoint, both))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    // trim() replaces the trimmed entity with a clone (and the limit entity
+    // too when both); the handles now point at undone entities.
+    QJsonArray replaced{args.value(QStringLiteral("handle"))};
+    if (both)
+        replaced.append(args.value(QStringLiteral("limit_handle")));
+    invalidateHandles(replaced);
+    return newEntitiesSince(before);
 }
 
 QJsonValue Dispatcher::opCmdDim(const QJsonObject &args)

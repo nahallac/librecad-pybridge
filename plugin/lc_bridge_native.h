@@ -40,6 +40,8 @@ class Plug_Entity;
 class QG_CommandWidget;
 class QTimer;
 class QWidget;
+class RS_Document;
+class RS_GraphicView;
 
 namespace lcbridge {
 
@@ -58,6 +60,9 @@ public:
     //! says which.
     bool commandsAvailable() const;
     bool selectionAvailable() const;
+    //! Engine modifications need the current document; false when the
+    //! application window has none (or the version check failed).
+    bool modificationAvailable() const;
     QString reason() const { return m_reason; }
 
     //! The LibreCAD version string the plugin was compiled against, as
@@ -80,6 +85,35 @@ public:
     //! getMax, maintained by calculateBorders()). False when unavailable or
     //! when the entity has no valid extent.
     bool boundingBox(Plug_Entity *entity, QPointF *min, QPointF *max) const;
+    //! Whether the entity has been removed from the drawing but kept for
+    //! undo. Doc_plugin_interface::getAllEntities() hands those out too, so
+    //! every census through the plugin API needs this to skip them.
+    bool isUndone(Plug_Entity *entity, bool *undone) const;
+    //! Identity of the engine entity behind a wrapper, for telling fresh
+    //! wrappers of the same entity apart from new entities. Opaque.
+    const void *entityKey(Plug_Entity *entity) const;
+
+    // Engine modifications, via RS_Modification -- the same code the modify
+    // tools run. offset/mirror/explode act on the current selection (set it
+    // with setSelected first); trim takes its entities explicitly. Each one
+    // reports false on an engine refusal, with lastError() saying why.
+    //! Copies of the selection offset by  distance toward  side;
+    //!  number copies (>= 1), or with  keepOriginal false the originals
+    //! are replaced by a single offset copy.
+    bool offset(const QPointF &side, double distance, int number,
+                bool keepOriginal, bool useCurrentLayer,
+                bool useCurrentAttributes);
+    //! Mirror the selection across the axis p1-p2;  copy keeps originals.
+    bool mirror(const QPointF &axisP1, const QPointF &axisP2, bool copy);
+    //! Replace each selected container with its members;  remove drops the
+    //! originals.
+    bool explode(bool remove);
+    //! Trim  trimEntity (atomic only) against  limitEntity.  trimPoint
+    //! lies on the part to keep;  limitPoint picks the intersection when
+    //! there are several.  both trims the limit entity too.
+    bool trim(Plug_Entity *trimEntity, const QPointF &trimPoint,
+              Plug_Entity *limitEntity, const QPointF &limitPoint, bool both);
+    QString lastError() const { return m_lastError; }
 
     //! Start watching for the hatch dialog. When it appears, fill it in and
     //! accept it. armed() stays true until the dialog was handled or
@@ -95,7 +129,10 @@ private:
 
     bool m_versionOk {false};
     QG_CommandWidget *m_commandWidget {nullptr};
+    RS_Document *m_document {nullptr};
+    RS_GraphicView *m_graphicView {nullptr};
     QString m_reason;
+    QString m_lastError;
 
     QTimer *m_hatchTimer {nullptr};
     QString m_hatchPattern;

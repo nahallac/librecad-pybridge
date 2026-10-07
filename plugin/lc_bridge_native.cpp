@@ -17,6 +17,10 @@
 // LibreCAD internals (source tree).
 #include "doc_plugin_interface.h"   // Plugin_Entity
 #include "rs_entity.h"              // RS_Entity::setSelected
+#include "rs_atomicentity.h"        // RS_AtomicEntity, for trim
+#include "rs_document.h"            // RS_Document is the RS_EntityContainer
+#include "rs_modification.h"        // RS_Modification: the modify tools
+#include "qc_applicationwindow.h"   // QC_ApplicationWindow::getAppWindow
 #include "qg_commandwidget.h"       // QG_CommandWidget::handleCommand
 #include "qg_dlghatch.h"            // QG_DlgHatch and its Ui members
 
@@ -65,6 +69,18 @@ bool isInstanceOf(const QObject *object, const char *className)
     return false;
 }
 
+RS_Vector toVector(const QPointF &point)
+{
+    // The (x, y, z) constructor is an exported symbol, but the default one
+    // is inline and the members are public, so this binds nothing.
+    RS_Vector vector;
+    vector.x = point.x();
+    vector.y = point.y();
+    vector.z = 0.0;
+    vector.valid = true;
+    return vector;
+}
+
 } // namespace
 
 QString NativeBridge::builtAgainst()
@@ -107,6 +123,21 @@ NativeBridge::NativeBridge(QWidget *mainWindow, QObject *parent)
     if (!m_commandWidget)
         m_reason = QStringLiteral("command widget not found in the main window");
 
+    // The document and view behind the Document_Interface, for
+    // RS_Modification. execComm() is only ever called for the active MDI
+    // window, so the application window's current ones are the right ones.
+    // These three accessors are the plugin's first bound symbols; they
+    // resolve against the executable's export table when LibreCAD loads it.
+    if (QC_ApplicationWindow *app = QC_ApplicationWindow::getAppWindow().get()) {
+        m_document = app->getDocument();
+        m_graphicView = app->getGraphicView();
+    }
+    if (!m_document) {
+        if (!m_reason.isEmpty())
+            m_reason += QStringLiteral("; ");
+        m_reason += QStringLiteral("no current document in the application window");
+    }
+
     m_hatchTimer = new QTimer(this);
     m_hatchTimer->setInterval(25);
     connect(m_hatchTimer, &QTimer::timeout,
@@ -124,6 +155,11 @@ bool NativeBridge::selectionAvailable() const
 {
     // Selection needs only the entity vtable, which the version check covers.
     return m_versionOk;
+}
+
+bool NativeBridge::modificationAvailable() const
+{
+    return m_versionOk && m_document != nullptr;
 }
 
 bool NativeBridge::execCommand(const QString &command)
@@ -176,6 +212,104 @@ bool NativeBridge::boundingBox(Plug_Entity *entity, QPointF *min,
         return false;
     *min = QPointF(lo.x, lo.y);
     *max = QPointF(hi.x, hi.y);
+    return true;
+}
+
+bool NativeBridge::isUndone(Plug_Entity *entity, bool *undone) const
+{
+    if (!m_versionOk)
+        return false;
+    RS_Entity *rsEntity = underlyingEntity(entity);
+    if (!rsEntity)
+        return false;
+    *undone = rsEntity->isUndone();   // RS_Undoable::isUndone, bound symbol
+    return true;
+}
+
+const void *NativeBridge::entityKey(Plug_Entity *entity) const
+{
+    return m_versionOk ? underlyingEntity(entity) : nullptr;
+}
+
+bool NativeBridge::offset(const QPointF &side, double distance, int number,
+                          bool keepOriginal, bool useCurrentLayer,
+                          bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_OffsetData data;
+    data.coord = toVector(side);
+    data.distance = distance;
+    // number == 0 is RS_Modification's "replace the originals" mode.
+    data.number = keepOriginal ? qMax(1, number) : 0;
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.offset(data)) {
+        m_lastError = QStringLiteral("RS_Modification::offset refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::mirror(const QPointF &axisP1, const QPointF &axisP2, bool copy)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_MirrorData data;
+    data.axisPoint1 = toVector(axisP1);
+    data.axisPoint2 = toVector(axisP2);
+    data.copy = copy;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.mirror(data)) {
+        m_lastError = QStringLiteral("RS_Modification::mirror refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::explode(bool remove)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.explode(remove)) {
+        m_lastError = QStringLiteral("RS_Modification::explode refused "
+                                     "(locked or hidden container?)");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::trim(Plug_Entity *trimEntity, const QPointF &trimPoint,
+                        Plug_Entity *limitEntity, const QPointF &limitPoint,
+                        bool both)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Entity *toTrim = underlyingEntity(trimEntity);
+    RS_Entity *limit = underlyingEntity(limitEntity);
+    if (!toTrim || !limit) {
+        m_lastError = QStringLiteral("entity not found");
+        return false;
+    }
+    if (!toTrim->isAtomic()) {
+        m_lastError = QStringLiteral("only atomic entities (line, arc, "
+                                     "circle, ellipse) can be trimmed");
+        return false;
+    }
+    if (both && !limit->isAtomic()) {
+        m_lastError = QStringLiteral("\"both\" needs an atomic limit entity");
+        return false;
+    }
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.trim(toVector(trimPoint),
+                           static_cast<RS_AtomicEntity *>(toTrim),
+                           toVector(limitPoint), limit, both)) {
+        m_lastError = QStringLiteral("RS_Modification::trim refused "
+                                     "(no intersection, or locked/hidden)");
+        return false;
+    }
     return true;
 }
 

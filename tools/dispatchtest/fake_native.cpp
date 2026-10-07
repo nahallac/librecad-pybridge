@@ -30,6 +30,13 @@ NativeBridge::~NativeBridge() = default;
 
 bool NativeBridge::commandsAvailable() const { return false; }
 bool NativeBridge::selectionAvailable() const { return false; }
+bool NativeBridge::modificationAvailable() const { return false; }
+const void *NativeBridge::entityKey(Plug_Entity *) const { return nullptr; }
+bool NativeBridge::isUndone(Plug_Entity *, bool *) const { return false; }
+bool NativeBridge::offset(const QPointF &, double, int, bool, bool, bool) { return false; }
+bool NativeBridge::mirror(const QPointF &, const QPointF &, bool) { return false; }
+bool NativeBridge::explode(bool) { return false; }
+bool NativeBridge::trim(Plug_Entity *, const QPointF &, Plug_Entity *, const QPointF &, bool) { return false; }
 bool NativeBridge::execCommand(const QString &) { return false; }
 bool NativeBridge::setSelected(Plug_Entity *, bool) { return false; }
 bool NativeBridge::isSelected(Plug_Entity *, bool *) const { return false; }

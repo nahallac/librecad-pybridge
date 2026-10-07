@@ -56,7 +56,10 @@ INCLUDEPATH += \
     $$LIBRECAD_SRC_LIB/lib/fileio \
     $$LIBRECAD_SRC_LIB/lib/actions \
     $$LIBRECAD_SRC_LIB/lib/information \
+    $$LIBRECAD_SRC_LIB/lib/modification \
+    $$LIBRECAD_SRC_LIB/lib/creation \
     $$LIBRECAD_SRC_LIB/main \
+    $$LIBRECAD_SRC_LIB/actions \
     $$LIBRECAD_SRC_LIB/ui \
     $$LIBRECAD_SRC_LIB/ui/forms \
     $$LIBRECAD_SRC/generated/librecad/ui

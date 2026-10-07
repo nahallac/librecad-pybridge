@@ -12,6 +12,8 @@
 #define LC_BRIDGE_DISPATCH_H
 
 #include <QHash>
+#include <QJsonArray>
+#include <QSet>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QString>
@@ -149,6 +151,10 @@ private:
     QJsonValue opEntitySelected(const QJsonObject &args);
     QJsonValue opEntityBbox(const QJsonObject &args);
     QJsonValue opGetBbox(const QJsonObject &args);
+    QJsonValue opModOffset(const QJsonObject &args);
+    QJsonValue opModMirror(const QJsonObject &args);
+    QJsonValue opModExplode(const QJsonObject &args);
+    QJsonValue opModTrim(const QJsonObject &args);
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
 
@@ -161,6 +167,20 @@ private:
     //! Reads (selection flag, bounding box) need the engine but not the
     //! command widget.
     void requireNativeEntityAccess() const;
+    void requireModification() const;
+    //! Set the drawing selection to exactly these handles; count selected.
+    int selectHandles(const QJsonArray &handles);
+    //! True when the entity was removed and only survives for undo. False
+    //! without the native layer, which cannot tell (see findings: the
+    //! plugin API's getAllEntities() reports undone entities).
+    bool isUndone(Plug_Entity *entity) const;
+    //! Identities of every entity in the drawing right now.
+    QSet<const void *> entityKeys();
+    //! Entities not in  before, registered as fresh handles, in the
+    //! get_entities row format.
+    QJsonArray newEntitiesSince(const QSet<const void *> &before);
+    //! Forget the handles in  handles (the entities were replaced).
+    void invalidateHandles(const QJsonArray &handles);
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

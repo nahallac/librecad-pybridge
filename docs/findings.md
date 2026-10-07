@@ -84,6 +84,18 @@ On top of those, `lc_bridge_native.cpp` implements:
 - `cmd_hatch` — select the boundary, arm a 25 ms timer that waits for the modal `QG_DlgHatch`,
   fill `cbPattern`/`leScale`/`leAngle`/`cbSolid` by object name, accept it, then run `hatch`.
   The timer fires inside the dialog's own `exec()` loop. Verified by counting HATCH entities.
+- `mod_offset`, `mod_mirror`, `mod_explode`, `mod_trim` — `RS_Modification`, the class the
+  modify actions delegate to, constructed on the application window's current `RS_Document`
+  and `RS_GraphicView` (`QC_ApplicationWindow::getAppWindow()`). These are the plugin's first
+  *bound* symbols: eight `U` entries (`RS_Modification::{ctor,offset,mirror,explode,trim}`,
+  `QC_ApplicationWindow::{getAppWindow,getDocument,getGraphicView}`) that the loader resolves
+  from the executable when LibreCAD loads the plugin. Binding is lazy, so `make check`'s
+  QPluginLoader run outside LibreCAD still succeeds. offset/mirror/explode act on the current
+  selection, which the operation sets from the given handles first; each returns the entities
+  it created, found by diffing engine entity identities before and after. `RS_Modification`
+  wraps its work in `LC_UndoSection`, which nests in the session's outer section like the
+  injected commands do. Verified live 2026-10-06 (offset/mirror/explode/trim, including
+  `both`).
 
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session
@@ -247,6 +259,16 @@ viable.
 - **Text styles** are passed by name as a string; `"standard"` is what the stock plugins use.
 
 ---
+
+## API detail — `getAllEntities()` reports undone entities
+
+`Doc_plugin_interface::getAllEntities()` iterates the container with no `isUndone()` check, and
+LibreCAD keeps removed entities in the container for undo. So after a `remove()` (or anything the
+modify tools replace), the plugin API still lists the dead entity: a census of a drawing with one
+trimmed line reports two LINEs. Found 2026-10-06 while verifying the modify operations. With the
+native layer, every census in the dispatcher (`get_entities`, `get_bbox`, the type counts, the
+select-all pass, and the created-entity diff) skips entities whose `RS_Undoable::isUndone()` is
+true; without it, the quirk shows through unchanged.
 
 ## Risk 8 — new: there is no way to read the current selection
 
