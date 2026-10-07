@@ -213,6 +213,19 @@ private:
     void requireView() const;
     QJsonValue zoomBy(const QJsonObject &args, bool out);
 
+    // Interactive prompts, as blocking operations: each one waits until the
+    // user answers in LibreCAD (or the optional timeout_ms cancels it), so
+    // the server handles nothing else meanwhile.
+    QJsonValue opPromptPoint(const QJsonObject &args);
+    QJsonValue opPromptSelect(const QJsonObject &args);
+    QJsonValue opPromptInt(const QJsonObject &args);
+    QJsonValue opPromptReal(const QJsonObject &args);
+    QJsonValue opPromptString(const QJsonObject &args);
+    //! The "timeout_ms" argument, 0 when absent. A timeout needs the native
+    //! layer to cancel the prompt; \a needsView for point and select
+    //! prompts, which are cancelled through the graphic view.
+    int promptTimeout(const QJsonObject &args, bool needsView) const;
+
     //! Entities of \a dpiType currently in the drawing.
     int countEntitiesOfType(int dpiType);
     //! Set every entity's selection flag; count of entities touched.

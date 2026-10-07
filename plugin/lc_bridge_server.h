@@ -17,6 +17,8 @@
 #define LC_BRIDGE_SERVER_H
 
 #include <QByteArray>
+#include <QJsonObject>
+#include <QList>
 
 #include "lc_bridge_native.h"
 #include <QObject>
@@ -30,6 +32,7 @@ class QLocalSocket;
 namespace lcbridge {
 
 class Dispatcher;
+class EventMonitor;
 class NativeBridge;
 
 /**
@@ -62,6 +65,22 @@ class NativeBridge;
  *                           LibreCAD activates. Refused with bad_request when
  *                           the drawing has unsaved changes and discard is
  *                           not set: LibreCAD would ask in a modal dialog.
+ *   {"op": "subscribe", "args": {"events": ["selection_changed", ...]}}
+ *   {"op": "unsubscribe", "args": {"events": [...]}}
+ *                       ->  {"ok": true, "result": {"subscribed": [...],
+ *                           "available": [...]}}. "*" means every event;
+ *                           unsubscribe without "events" drops them all.
+ *                           Subscriptions belong to the connection.
+ *
+ * Push events: once subscribed, the server also writes unsolicited frames
+ *
+ *   {"event": "<name>", "seq": n, "data": {...}}
+ *
+ * on the same connection, same framing, each one a whole line. They never
+ * split a response line; events raised while a request is being handled
+ * are written after its response, except session_ending, which goes out
+ * just before the response to the request that ends the session, so the
+ * client holds it by the time that response arrives. See EventMonitor.
  *
  * One client at a time; a second connection is sent an error line and closed.
  * A client disconnect does not stop the server -- the session ends on
@@ -111,10 +130,14 @@ private slots:
     void onNewConnection();
     void onReadyRead();
     void onDisconnected();
+    void onEventRaised(const QString &name, const QJsonObject &data);
 
 private:
     void processLine(const QByteArray &line);
     void sendToClient(const QByteArray &line);
+    QByteArray eventFrame(const QString &name, const QJsonObject &data);
+    //! Write session_ending (once per session) if the client subscribed.
+    void announceSessionEnding(const QString &reason);
 
     QJsonObject sessionRequest(const QJsonObject &request, bool *stopAfter);
     //! activate_document / file_close. Return an error response, or an empty
@@ -136,6 +159,12 @@ private:
     int m_requestsHandled {0};
     bool m_stopping {false};
     QEventLoop *m_stopLoop {nullptr};
+
+    EventMonitor *m_events {nullptr};
+    QList<QByteArray> m_pendingEvents;   // raised while a request ran
+    bool m_processing {false};
+    bool m_sessionEndingSent {false};
+    int m_eventSeq {0};
 };
 
 } // namespace lcbridge

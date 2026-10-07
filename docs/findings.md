@@ -296,6 +296,58 @@ plus a handful of bound symbols (`RS_LayerList::{find,set*Multi}`, `RS_Layer::{i
   `RS_Entity::getDistanceToPoint` minimum over visible, unlocked entities; the loop applies the
   type and distance filters first and maps the winner to a handle without searching twice. Locked
   layers are searched (the engine function skips them, because it exists for picking).
+### Prompts and push events (2026-10-06)
+
+**Prompts** (`prompt_point/select/int/real/string`) call the plugin API's `getPoint`, `getSelect`,
+`getInt`, `getReal`, `getString` straight from the request handler. `getPoint`/`getSelect` install
+a `QC_ActionGet*` action and busy-spin `QEventLoop::processEvents()` until it completes or the
+action stack empties; the dialogs are the static `QInputDialog` helpers (modal `exec()`). Either
+way the socket's `readyRead` can fire from inside the prompt, so `BridgeServer::onReadyRead` now
+only buffers when re-entered and the outer call picks the lines up afterwards. What the source
+showed, and what that forced:
+
+- **Cancelling `getPoint` from outside must not empty the action stack.** The stack holds actions
+  by `shared_ptr`; `killAllActions()` (and LibreCAD's own right-click path) deletes the
+  `QC_ActionGetPoint` while `getPoint()` still holds a raw pointer it reads after the loop
+  (`a->isCompleted()`, `a->wasCanceled()`, `a->getPoint()`) — a use-after-free in LibreCAD itself
+  on every user cancel. The timeout instead calls the action's virtual `trigger()`, which only sets
+  `completed`: the action stays alive, `getPoint()` leaves its loop normally and kills it itself,
+  and the dispatcher discards the point it reports. The action is captured on the watcher's first
+  tick through a `QPointer` (it is a `QObject`), so a user who finishes it first cannot leave a
+  dangling pointer behind. `getSelect()` only compares its pointer after the loop (`isValid`), so
+  `killAllActions()` is safe there. Two new bound symbols: `RS_GraphicView::getCurrentAction`,
+  `killAllActions`.
+- **`getSelect()` reports every ending as a cancel in 2.2.1.5.** Enter, Escape and right click all
+  `finish()` both `QC_ActionGetSelect` and the `RS_ActionSelectSingle` it pushes; the next
+  `hasAction()` drops both from the stack, the loop breaks on the empty stack, and the
+  `isValid(a)` meant to distinguish "cancelled" (issue #349) can then never succeed. The user's
+  selection is still in the drawing, so `prompt_select` reads it back through the native layer
+  (selected, not undone) and reports `cancelled` only when nothing is selected or it timed out.
+- **The dialogs take no default.** `getInt` etc. always start at 0/empty; the prompt watcher
+  (a 25 ms timer, like the hatch dialog's) finds the visible `QInputDialog` and sets the default,
+  and on timeout queues `reject()`. Plain Qt, no LibreCAD symbol. `getString()` leaves its output
+  untouched when an empty field is accepted, so it starts empty.
+- `timeout_ms` verified live headless: all five prompts return `{"cancelled": true, "timed_out":
+  true}` after 0.52 s for 500 ms, and the session carries on normally afterwards. Answering a
+  prompt needs a person and was not exercised.
+
+**Push events** come from `EventMonitor`: a 100 ms timer that runs only while a polled event is
+subscribed and never during a request, diffing a snapshot: live and selected entity counts (one
+pass over `RS_EntityContainer::begin()/end() const` with the `isUndone()` filter — bound, no
+wrappers allocated), current layer and layer list (plugin API), `isModified()` (virtual), view
+factor and offsets (`RS_GraphicView::getFactor/getOffsetX/getOffsetY`, bound), and the grid
+(`getGraphicVariableInt("$GRIDMODE", 1)`, bound, the same default `RS_Graphic::isGridOn` uses).
+LibreCAD's listener interfaces (`RS_LayerListListener`, ...) are not implemented: deriving from
+them binds their vtables at load. Qt signals were the other candidate. `QC_ApplicationWindow`'s
+`gridChanged(bool)` turned out to fire only on window activation and file loads, not when the grid
+is toggled, and `draftChanged(bool)` is declared but never emitted, so only `windowsChanged(bool)`
+is used, connected with the string `SIGNAL()` form on the `QWidget` the plugin receives (checked
+with `indexOfSignal` first) — no symbol at all. Verified live headless: `entity_count_changed`
+(including a drop on `undo()`), `selection_changed` on `select()`/`unselect()`, `layer_changed`,
+`view_changed` on `zoomauto`, `grid_changed` on `$GRIDMODE`, `document_modified` false after
+`save_as` and true after the next edit, `session_ending` before the shutdown response.
+`windows_changed` is connected but was not exercised (no way to open a second window from inside a
+session headless).
 
 ---
 
@@ -585,8 +637,10 @@ reproduces this failure if anyone switches back. Reverting the fix turns 51 pass
 - **Risk 5 — ABI fragility.** Unchanged. Qt 5.15 is end-of-life; an Arch move to Qt 6 forces a
   rebuild. The `.pro` file hard-errors on a non-Qt-5 qmake so the failure is loud rather than a
   silently unloadable plugin.
-- **Risk 6 — interactive prompts re-enter the event loop.** Confirmed from the source, still
-  untested at runtime. `getPoint`, `getEnt`, `getSelect`, and `getSelectByType` each construct a
+- **Risk 6 — interactive prompts re-enter the event loop.** Now handled for `getPoint`,
+  `getSelect` and the dialogs (see "Prompts and push events" above): the server no longer
+  re-enters on socket input, and a timeout cancels without tripping LibreCAD's own
+  use-after-free. The original analysis: `getPoint`, `getEnt`, `getSelect`, and `getSelectByType` each construct a
   `QC_Action*`, call `gView->killAllActions()`, install the action, and then spin a
   `QEventLoop` until it completes. Calling one from inside the server loop nests event loops, and
   it also destroys whatever action the user had in progress.

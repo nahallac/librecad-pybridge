@@ -40,6 +40,7 @@
 #include "rs_staticgraphicview.h"   // off-screen rendering for export
 #include "rs_painterqt.h"           // the painter LibreCAD exports with
 #include "rs_units.h"               // paper formats, unit conversion
+#include "rs_actioninterface.h"     // RS_ActionInterface::trigger, for prompts
 
 #include <QAction>
 #include <QApplication>
@@ -48,6 +49,7 @@
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QImageWriter>
+#include <QInputDialog>
 #include <QLineEdit>
 #include <QMdiArea>
 #include <QMdiSubWindow>
@@ -306,7 +308,15 @@ QString NativeBridge::running()
 
 NativeBridge::NativeBridge(QWidget *mainWindow, QObject *parent)
     : QObject(parent)
+    , m_mainWindow(mainWindow)
 {
+    // The prompt watcher handles QInputDialogs, which are plain Qt, so it
+    // exists whatever the version check below decides; the parts of it that
+    // reach into the graphic view check m_versionOk themselves.
+    m_promptTimer = new QTimer(this);
+    m_promptTimer->setInterval(25);
+    connect(m_promptTimer, &QTimer::timeout, this, &NativeBridge::pollPrompt);
+
     // Layouts and vtables are only known to match the LibreCAD whose headers
     // this was compiled against, so nothing below runs unless the process
     // says it is that version (main.cpp sets applicationVersion from
@@ -1843,6 +1853,172 @@ void NativeBridge::isolateStretch(const QPointF &firstCorner,
             return;
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// Prompts and push events
+// --------------------------------------------------------------------------
+
+QWidget *NativeBridge::mainWindow() const
+{
+    return m_mainWindow;
+}
+
+void NativeBridge::armPrompt(PromptKind kind, int timeoutMs,
+                             const QVariant &dialogDefault)
+{
+    m_promptKind = kind;
+    m_promptTimeoutMs = timeoutMs;
+    m_promptDefault = dialogDefault;
+    m_promptDefaultApplied = false;
+    m_promptCancelled = false;
+    m_promptAction.clear();
+    m_promptArmed = true;
+    m_promptClock.start();
+    // Always polled while armed, even with no default and no deadline: a
+    // point prompt's action is captured on the first tick so that the Stop
+    // button can cancel it cleanly later.
+    m_promptTimer->start();
+}
+
+bool NativeBridge::disarmPrompt()
+{
+    m_promptTimer->stop();
+    m_promptArmed = false;
+    m_promptAction.clear();
+    return m_promptCancelled;
+}
+
+void NativeBridge::pollPrompt()
+{
+    if (!m_promptArmed) {
+        m_promptTimer->stop();
+        return;
+    }
+
+    if (m_promptKind == DialogPrompt && !m_promptDefaultApplied
+        && m_promptDefault.isValid()) {
+        // Doc_plugin_interface::getInt/getReal/getString call the static
+        // QInputDialog helpers, which always start at 0 or empty; filling in
+        // the dialog the helper opened is the only way to offer a default.
+        for (QWidget *top : QApplication::topLevelWidgets()) {
+            auto *dialog = qobject_cast<QInputDialog *>(top);   // Qt class: no binding
+            if (!dialog || !dialog->isVisible())
+                continue;
+            switch (dialog->inputMode()) {
+            case QInputDialog::IntInput:
+                dialog->setIntValue(m_promptDefault.toInt());
+                break;
+            case QInputDialog::DoubleInput:
+                dialog->setDoubleValue(m_promptDefault.toDouble());
+                break;
+            case QInputDialog::TextInput:
+                dialog->setTextValue(m_promptDefault.toString());
+                break;
+            }
+            m_promptDefaultApplied = true;
+            break;
+        }
+    }
+
+    // getPoint() installs its QC_ActionGetPoint before it spins; remember it
+    // -- weakly: it is a QObject, and the user may finish it at any moment --
+    // so that cancelPrompt() can complete that very action.
+    if (m_promptKind == PointPrompt && !m_promptAction && m_versionOk
+        && m_graphicView) {
+        RS_ActionInterface *action = m_graphicView->getCurrentAction();
+        if (action && isInstanceOf(action, "QC_ActionGetPoint"))
+            m_promptAction = action;
+    }
+
+    if (m_promptTimeoutMs > 0 && m_promptClock.elapsed() >= m_promptTimeoutMs)
+        cancelPrompt();
+}
+
+void NativeBridge::cancelPrompt()
+{
+    if (!m_promptArmed || m_promptCancelled)
+        return;
+    m_promptCancelled = true;
+    m_promptTimer->stop();
+
+    if (m_promptKind == DialogPrompt) {
+        // The static QInputDialog helpers report ok == false on reject().
+        // Queued, so the dialog's exec() loop sees it on its next turn rather
+        // than from inside this timer callback.
+        for (QWidget *top : QApplication::topLevelWidgets()) {
+            auto *dialog = qobject_cast<QInputDialog *>(top);
+            if (dialog && dialog->isVisible())
+                QMetaObject::invokeMethod(dialog, "reject", Qt::QueuedConnection);
+        }
+        return;
+    }
+
+    if (!m_versionOk || !m_graphicView)
+        return;
+
+    if (m_promptKind == PointPrompt && m_promptAction) {
+        // Not killAllActions(): the action stack owns the action through a
+        // shared_ptr, and getPoint() dereferences its raw pointer after the
+        // loop (a->isCompleted(), a->wasCanceled()), so emptying the stack
+        // under it leaves getPoint() reading freed memory. trigger() only
+        // sets "completed"; the action stays alive, getPoint() leaves its
+        // loop normally and kills the action itself. It then reports the
+        // last mouse position as the answer, which the dispatcher discards
+        // because disarmPrompt() says the prompt was cancelled.
+        static_cast<RS_ActionInterface *>(m_promptAction.data())->trigger();
+        return;
+    }
+
+    // getSelect(): its loop ends when the action stack is empty, and after
+    // the loop it only compares the action pointer (isValid), never
+    // dereferences it, so emptying the stack is safe there. Also the
+    // fallback for a point prompt whose action was never seen.
+    m_graphicView->killAllActions();
+}
+
+bool NativeBridge::census(int *live, int *selected) const
+{
+    if (!modificationAvailable())
+        return false;
+    int liveCount = 0;
+    int selectedCount = 0;
+    // RS_EntityContainer::begin()/end() const are exported functions; the
+    // undone filter is the one every census in the dispatcher applies.
+    const RS_EntityContainer &container = *m_document;
+    for (RS_Entity *entity : container) {
+        if (!entity || entity->isUndone())
+            continue;
+        ++liveCount;
+        if (entity->isSelected())
+            ++selectedCount;
+    }
+    *live = liveCount;
+    *selected = selectedCount;
+    return true;
+}
+
+bool NativeBridge::viewState(double *factor, int *offsetX, int *offsetY) const
+{
+    if (!m_versionOk || !m_graphicView)
+        return false;
+    *factor = m_graphicView->getFactor().x;   // three bound symbols
+    *offsetX = m_graphicView->getOffsetX();
+    *offsetY = m_graphicView->getOffsetY();
+    return true;
+}
+
+bool NativeBridge::gridState(bool *on) const
+{
+    if (!modificationAvailable())
+        return false;
+    // What RS_Graphic::isGridOn() does, default included (an unset
+    // $GRIDMODE means on). The plugin API's getVariableInt() cannot tell an
+    // unset variable from 0, and QC_ApplicationWindow's gridChanged signal
+    // only fires on window activation and file loads, not when the grid is
+    // toggled -- so the state is polled.
+    *on = m_document->getGraphicVariableInt(QStringLiteral("$GRIDMODE"), 1) != 0;
+    return true;
 }
 
 } // namespace lcbridge

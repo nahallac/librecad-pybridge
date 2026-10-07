@@ -102,5 +102,15 @@ bool NativeBridge::changeAttributes(const AttributeChange &) { return false; }
 bool NativeBridge::revertDirection() { return false; }
 void NativeBridge::isolateReplacement(const QList<Plug_Entity *> &) {}
 void NativeBridge::isolateStretch(const QPointF &, const QPointF &) {}
+// Prompts and push events: the stub document answers every prompt at once,
+// so there is nothing to watch or cancel.
+QWidget *NativeBridge::mainWindow() const { return nullptr; }
+void NativeBridge::armPrompt(PromptKind, int, const QVariant &) {}
+bool NativeBridge::disarmPrompt() { return false; }
+void NativeBridge::cancelPrompt() {}
+void NativeBridge::pollPrompt() {}
+bool NativeBridge::census(int *, int *) const { return false; }
+bool NativeBridge::viewState(double *, int *, int *) const { return false; }
+bool NativeBridge::gridState(bool *) const { return false; }
 
 } // namespace lcbridge

@@ -21,11 +21,13 @@ SOURCES += \
     fake_native.cpp \
     $$PWD/../../plugin/lc_bridge_dispatch.cpp \
     $$PWD/../../plugin/lc_bridge_selftest.cpp \
-    $$PWD/../../plugin/lc_bridge_server.cpp
+    $$PWD/../../plugin/lc_bridge_server.cpp \
+    $$PWD/../../plugin/lc_bridge_events.cpp
 
 HEADERS += \
     fake_document.h \
     $$PWD/../../plugin/lc_bridge_dispatch.h \
     $$PWD/../../plugin/lc_bridge_native.h \
     $$PWD/../../plugin/lc_bridge_selftest.h \
-    $$PWD/../../plugin/lc_bridge_server.h
+    $$PWD/../../plugin/lc_bridge_server.h \
+    $$PWD/../../plugin/lc_bridge_events.h

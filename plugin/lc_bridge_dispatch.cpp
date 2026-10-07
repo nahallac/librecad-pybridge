@@ -622,6 +622,11 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("mod_cut"),              &Dispatcher::opModCut},
         {QStringLiteral("mod_change_attributes"), &Dispatcher::opModChangeAttributes},
         {QStringLiteral("mod_revert_direction"), &Dispatcher::opModRevertDirection},
+        {QStringLiteral("prompt_point"),         &Dispatcher::opPromptPoint},
+        {QStringLiteral("prompt_select"),        &Dispatcher::opPromptSelect},
+        {QStringLiteral("prompt_int"),           &Dispatcher::opPromptInt},
+        {QStringLiteral("prompt_real"),          &Dispatcher::opPromptReal},
+        {QStringLiteral("prompt_string"),        &Dispatcher::opPromptString},
     };
     return table;
 }
@@ -660,6 +665,11 @@ const QSet<QString> &Dispatcher::readOnlyOperations()
         QStringLiteral("zoom_page"),       QStringLiteral("get_view"),
         QStringLiteral("set_view"),        QStringLiteral("list_documents"),
         QStringLiteral("export_image"),    QStringLiteral("export_pdf"),
+        // Prompts read an answer; whatever the user does meanwhile is
+        // LibreCAD's own business, with its own undo handling.
+        QStringLiteral("prompt_point"),    QStringLiteral("prompt_select"),
+        QStringLiteral("prompt_int"),      QStringLiteral("prompt_real"),
+        QStringLiteral("prompt_string"),
     };
     return table;
 }
@@ -1027,7 +1037,8 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
 {
     // This is the only non-interactive query in the API. getSelect(),
     // getSelectByType(), and getEnt() all prompt the user and spin a nested
-    // event loop, so they are not exposed here; see docs/findings.md, risk 6.
+    // event loop; getSelect() is exposed separately as the blocking
+    // prompt_select. See docs/findings.md, risk 6.
     QList<int> wanted;
     if (args.contains(QStringLiteral("types"))) {
         const QJsonArray types = requireArray(args, QStringLiteral("types"), 1);
@@ -1850,8 +1861,8 @@ QJsonValue Dispatcher::opCmdHatch(const QJsonObject &args)
 }
 
 // --------------------------------------------------------------------------
-// Layer state, block definition, geometry queries
-// Modify tools: the rest of RS_Modification
+// Layer state, block definition, geometry queries; modify tools: the rest
+// of RS_Modification; interactive prompts.
 //
 // Same shape as mod_offset: the entity identities are snapshotted, the engine
 // runs its own modify code, entities it replaced lose their handles, and the
@@ -1859,6 +1870,16 @@ QJsonValue Dispatcher::opCmdHatch(const QJsonObject &args)
 // RS_Modification's "number": 0 transforms the originals (the engine replaces
 // them with transformed clones, so their handles die); n >= 1 keeps them and
 // adds n copies at 1x, 2x, ... nx the transformation.
+// Interactive prompts. Document_Interface's getPoint/getSelect install a
+// LibreCAD action and spin processEvents() until it completes; getInt/
+// getReal/getString open a modal QInputDialog. Either way the call blocks,
+// so the server handles nothing else until the user answers -- clients call
+// these with no socket timeout. Every prompt replies
+//   {"cancelled": true[, "timed_out": true]}  or
+//   {"cancelled": false, <"point" | "entities" | "value">: ...}.
+// The NativeBridge prompt watcher supplies the optional timeout_ms (and the
+// dialogs' default values); without the native layer prompts still work,
+// only without a way out other than the user.
 // --------------------------------------------------------------------------
 
 namespace {
@@ -1927,6 +1948,23 @@ int colorArg(const QJsonValue &value)
     }
     badArgs(QStringLiteral("\"color\" must be an RGB integer, -1, -2, "
                            "\"bylayer\", or \"byblock\""));
+}
+
+QJsonObject promptCancelled(bool timedOut)
+{
+    QJsonObject result;
+    result.insert(QStringLiteral("cancelled"), true);
+    if (timedOut)
+        result.insert(QStringLiteral("timed_out"), true);
+    return result;
+}
+
+QJsonObject promptAnswer(const QString &key, const QJsonValue &value)
+{
+    QJsonObject result;
+    result.insert(QStringLiteral("cancelled"), false);
+    result.insert(key, value);
+    return result;
 }
 
 } // namespace
@@ -2762,6 +2800,168 @@ QJsonValue Dispatcher::opModRevertDirection(const QJsonObject &args)
         throw RequestError(QStringLiteral("failed"), m_native->lastError());
     invalidateHandles(handles);
     return newEntitiesSince(before);
+}
+
+int Dispatcher::promptTimeout(const QJsonObject &args, bool needsView) const
+{
+    if (!args.contains(QStringLiteral("timeout_ms")))
+        return 0;
+    const double timeoutMs = requireNumber(args, QStringLiteral("timeout_ms"));
+    if (timeoutMs < 1 || timeoutMs > 24.0 * 3600 * 1000)
+        badArgs(QStringLiteral("\"timeout_ms\" must be between 1 and a day"));
+    if (!m_native || (needsView && !m_native->modificationAvailable()))
+        nativeUnavailable();
+    return static_cast<int>(timeoutMs);
+}
+
+QJsonValue Dispatcher::opPromptPoint(const QJsonObject &args)
+{
+    const QString message = optionalString(args, QStringLiteral("message"), QString());
+    const bool hasBase = args.contains(QStringLiteral("base"));
+    QPointF base;
+    if (hasBase)
+        base = requirePoint(args, QStringLiteral("base"));
+    const int timeoutMs = promptTimeout(args, true);
+
+    // getPoint() ends whatever action the user had running, shows the
+    // message on the command line, and draws a rubber band from "base".
+    // A click or a coordinate typed on the command line answers it; a right
+    // click cancels.
+    QPointF point;
+    if (m_native)
+        m_native->armPrompt(NativeBridge::PointPrompt, timeoutMs, QVariant());
+    const bool answered = m_doc->getPoint(&point, message, hasBase ? &base : nullptr);
+    const bool cancelled = m_native && m_native->disarmPrompt();
+    if (!answered || cancelled)
+        return promptCancelled(cancelled);
+    return promptAnswer(QStringLiteral("point"), pointJson(point));
+}
+
+QJsonValue Dispatcher::opPromptSelect(const QJsonObject &args)
+{
+    const QString message = optionalString(args, QStringLiteral("message"), QString());
+    const int timeoutMs = promptTimeout(args, true);
+
+    QList<Plug_Entity *> picked;
+    if (m_native)
+        m_native->armPrompt(NativeBridge::SelectPrompt, timeoutMs, QVariant());
+    const bool answered = m_doc->getSelect(&picked, message);
+    const bool cancelled = m_native && m_native->disarmPrompt();
+
+    // In LibreCAD 2.2.1.5 getSelect() reports false however the selection
+    // ends (Enter, Escape, right click): every way out finishes the action,
+    // the action stack drops it, and the isValid() check that is meant to
+    // tell "cancelled" from "done" never finds it (see docs/findings.md).
+    // The user's selection is still in the drawing, though, so with the
+    // native layer the answer is read from there; without it only a true
+    // return can be trusted.
+    QList<Plug_Entity *> chosen;
+    if (!cancelled && m_native && m_native->selectionAvailable()) {
+        qDeleteAll(picked);
+        picked.clear();
+        if (m_doc->getAllEntities(&picked, false)) {
+            for (Plug_Entity *entity : picked) {
+                bool selected = false;
+                if (entity && !isUndone(entity)
+                    && m_native->isSelected(entity, &selected) && selected) {
+                    chosen.append(entity);
+                } else {
+                    delete entity;
+                }
+            }
+        }
+    } else if (!cancelled && answered) {
+        for (Plug_Entity *entity : picked) {
+            if (entity && !isUndone(entity))
+                chosen.append(entity);
+            else
+                delete entity;
+        }
+    } else {
+        qDeleteAll(picked);
+    }
+    picked.clear();
+
+    if (chosen.isEmpty())
+        return promptCancelled(cancelled);
+
+    QJsonArray rows;
+    for (Plug_Entity *entity : chosen) {
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        const auto typeField = data.constFind(DPI::ETYPE);
+        const int type = typeField == data.constEnd() ? DPI::UNKNOWN
+                                                      : typeField->toInt();
+        QJsonObject item;
+        item.insert(QStringLiteral("handle"), registerEntity(entity));
+        item.insert(QStringLiteral("type"), typeToName(type));
+        item.insert(QStringLiteral("data"), entityDataToJson(type, data));
+        rows.append(item);
+    }
+    return promptAnswer(QStringLiteral("entities"), rows);
+}
+
+QJsonValue Dispatcher::opPromptInt(const QJsonObject &args)
+{
+    const QString message = optionalString(args, QStringLiteral("message"), QString());
+    const QString title = optionalString(args, QStringLiteral("title"), QString());
+    QVariant fallback;
+    if (args.contains(QStringLiteral("default"))) {
+        const double value = requireNumber(args, QStringLiteral("default"));
+        if (value != std::floor(value) || qAbs(value) > 2147483647.0)
+            badArgs(QStringLiteral("\"default\" must be a 32-bit integer"));
+        fallback = static_cast<int>(value);
+    }
+    const int timeoutMs = promptTimeout(args, false);
+
+    int value = 0;
+    if (m_native)
+        m_native->armPrompt(NativeBridge::DialogPrompt, timeoutMs, fallback);
+    const bool answered = m_doc->getInt(&value, message, title);
+    const bool cancelled = m_native && m_native->disarmPrompt();
+    if (!answered || cancelled)
+        return promptCancelled(cancelled);
+    return promptAnswer(QStringLiteral("value"), value);
+}
+
+QJsonValue Dispatcher::opPromptReal(const QJsonObject &args)
+{
+    const QString message = optionalString(args, QStringLiteral("message"), QString());
+    const QString title = optionalString(args, QStringLiteral("title"), QString());
+    QVariant fallback;
+    if (args.contains(QStringLiteral("default")))
+        fallback = requireNumber(args, QStringLiteral("default"));
+    const int timeoutMs = promptTimeout(args, false);
+
+    qreal value = 0.0;
+    if (m_native)
+        m_native->armPrompt(NativeBridge::DialogPrompt, timeoutMs, fallback);
+    const bool answered = m_doc->getReal(&value, message, title);
+    const bool cancelled = m_native && m_native->disarmPrompt();
+    if (!answered || cancelled)
+        return promptCancelled(cancelled);
+    return promptAnswer(QStringLiteral("value"), value);
+}
+
+QJsonValue Dispatcher::opPromptString(const QJsonObject &args)
+{
+    const QString message = optionalString(args, QStringLiteral("message"), QString());
+    const QString title = optionalString(args, QStringLiteral("title"), QString());
+    QVariant fallback;
+    if (args.contains(QStringLiteral("default")))
+        fallback = requireString(args, QStringLiteral("default"));
+    const int timeoutMs = promptTimeout(args, false);
+
+    // getString() leaves the string alone when the user accepts an empty
+    // field, so it starts empty: an accepted empty field answers "".
+    QString value;
+    if (m_native)
+        m_native->armPrompt(NativeBridge::DialogPrompt, timeoutMs, fallback);
+    const bool answered = m_doc->getString(&value, message, title);
+    const bool cancelled = m_native && m_native->disarmPrompt();
+    if (!answered || cancelled)
+        return promptCancelled(cancelled);
+    return promptAnswer(QStringLiteral("value"), value);
 }
 
 } // namespace lcbridge

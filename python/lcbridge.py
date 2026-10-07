@@ -10,6 +10,9 @@ Unix domain socket):
     explode/trim, undo steps, save/open/new, zoom and view, switching and
     closing document windows, image/PDF export. Document.launch() starts a
     LibreCAD of its own, windowed or headless, with the session auto-started.
+    Interactive prompts (prompt_point/select/int/real/string) ask the person
+    at LibreCAD and block until answered; subscribe()/events()/on() receive
+    push events (selection changed, document modified, ...).
 
 Usage:
 
@@ -43,6 +46,7 @@ from __future__ import annotations
 
 __version__ = "0.2.0"
 
+import collections
 import json
 import os
 import time
@@ -77,11 +81,42 @@ class ProtocolError(Exception):
     """The connection broke or the server sent something unreadable."""
 
 
+EVENT_QUEUE_LIMIT = 1000
+
+
+def _is_event(frame: dict[str, Any]) -> bool:
+    """Push-event frames carry "event"; responses carry "ok"."""
+    return "event" in frame and "ok" not in frame
+
+
+class _SocketTimeout:
+    """Context manager: a different socket timeout for one call."""
+
+    def __init__(self, sock: socket.socket, timeout: float | None):
+        self._sock = sock
+        self._timeout = timeout
+        self._previous: float | None = None
+
+    def __enter__(self) -> None:
+        self._previous = self._sock.gettimeout()
+        self._sock.settimeout(self._timeout)
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._sock.settimeout(self._previous)
+
+
 class Bridge:
     """One connection to a running bridge session.
 
     Context manager; closing does not end the session in LibreCAD, it only
     disconnects. Call shutdown() to end the session itself.
+
+    Push events: after a ``subscribe`` request the server may write event
+    frames, ``{"event": name, "seq": n, "data": {...}}``, at any time. Frames
+    that arrive while a response is awaited are queued in ``events`` (a
+    deque bounded at EVENT_QUEUE_LIMIT, oldest dropped first); poll_events()
+    drains the queue and reads whatever else is pending. A client that never
+    subscribes never sees one.
     """
 
     def __init__(self, path: str | None = None, timeout: float | None = 30.0):
@@ -90,8 +125,13 @@ class Bridge:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(timeout)
         self._sock.connect(self._path)
-        self._reader = self._sock.makefile("rb")
+        # Own line buffer rather than socket.makefile(): a file object is
+        # unusable after one read timeout, and poll_events() times out by
+        # design. A partial line simply stays here for the next read.
+        self._buffer = bytearray()
         self._next_id = 1
+        self.events: collections.deque[dict[str, Any]] = \
+            collections.deque(maxlen=EVENT_QUEUE_LIMIT)
 
     # -- context manager ----------------------------------------------------
 
@@ -103,10 +143,7 @@ class Bridge:
 
     def close(self) -> None:
         """Disconnect. The bridge session in LibreCAD keeps running."""
-        try:
-            self._reader.close()
-        finally:
-            self._sock.close()
+        self._sock.close()
 
     # -- protocol -----------------------------------------------------------
 
@@ -132,18 +169,80 @@ class Bridge:
         line = json.dumps(request, separators=(",", ":")) + "\n"
         try:
             self._sock.sendall(line.encode("utf-8"))
-            reply = self._reader.readline()
+            while True:
+                frame = self._read_frame()
+                if not _is_event(frame):
+                    return frame
+                self.events.append(frame)    # arrived ahead of the response
         except OSError as error:
             raise ProtocolError(f"connection failed: {error}") from error
-        if not reply:
-            raise ProtocolError("server closed the connection")
+
+    def _read_frame(self) -> dict[str, Any]:
+        """The next complete line as a JSON object, reading as needed under
+        the socket's current timeout (socket.timeout / BlockingIOError
+        propagate, leaving any partial line buffered)."""
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(self._buffer[:newline])
+                del self._buffer[:newline + 1]
+                if line.strip():
+                    break
+                continue
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise ProtocolError("server closed the connection")
+            self._buffer += chunk
         try:
-            response = json.loads(reply)
+            frame = json.loads(line)
         except json.JSONDecodeError as error:
             raise ProtocolError(f"unreadable response: {error}") from error
-        if not isinstance(response, dict):
+        if not isinstance(frame, dict):
             raise ProtocolError("response was not a JSON object")
-        return response
+        return frame
+
+    def socket_timeout(self, timeout: float | None) -> _SocketTimeout:
+        """``with bridge.socket_timeout(None): ...`` -- another timeout for
+        the calls inside (None waits forever), restored afterwards. For the
+        blocking prompt operations."""
+        return _SocketTimeout(self._sock, timeout)
+
+    def poll_events(self, timeout: float = 0.0) -> list[dict[str, Any]]:
+        """Return queued event frames plus any that arrive now.
+
+        Waits up to ``timeout`` seconds for the first frame when none is
+        queued, then takes whatever else is already pending without
+        waiting. ``timeout=0`` never blocks. Call only between requests.
+        """
+        drained = list(self.events)
+        self.events.clear()
+        deadline = time.monotonic() + max(0.0, timeout)
+        previous = self._sock.gettimeout()
+        try:
+            while True:
+                remaining = 0.0 if drained else deadline - time.monotonic()
+                # 0.0 puts the socket in non-blocking mode for this read.
+                self._sock.settimeout(max(0.0, remaining))
+                try:
+                    frame = self._read_frame()
+                except (socket.timeout, BlockingIOError):
+                    break
+                except ProtocolError:
+                    if drained:     # e.g. session_ending, then the close
+                        break
+                    raise
+                if not _is_event(frame):
+                    raise ProtocolError(
+                        "received a response with no request pending")
+                drained.append(frame)
+        except OSError as error:
+            raise ProtocolError(f"connection failed: {error}") from error
+        finally:
+            try:
+                self._sock.settimeout(previous)
+            except OSError:
+                pass
+        return drained
 
     def batch(self, requests: list[dict[str, Any]],
               stop_on_error: bool = True) -> list[dict[str, Any]]:
@@ -549,6 +648,11 @@ class Document:
         # Bumped when open()/new() start a fresh session; handles from the
         # old one are meaningless there, so Entity checks it.
         self._generation = 0
+        # Push events: what this Document subscribed to (re-subscribed after
+        # open()/new(), since subscriptions belong to a connection) and the
+        # callbacks on() registered, by event name ("*" for all).
+        self._subscriptions: set[str] = set()
+        self._handlers: dict[str, list[Any]] = {}
 
     @classmethod
     def connect(cls, path: str | None = None,
@@ -1105,6 +1209,7 @@ class Document:
             return result
         socket_path = self._bridge._path
         bridge_timeout = self._bridge._timeout
+        old_events = list(self._bridge.events)
         self._bridge.close()
         self._generation += 1
         if isinstance(result, dict) and result.get("remaining") == 0:
@@ -1123,6 +1228,13 @@ class Document:
                 try:
                     if probe.request("session")["id"] != old_id:
                         probe._sock.settimeout(bridge_timeout)
+                        # Events the old connection queued (session_ending,
+                        # say) stay readable; subscriptions start afresh on
+                        # a new connection, so renew them.
+                        probe.events.extend(old_events)
+                        if self._subscriptions:
+                            probe.request("subscribe",
+                                          events=sorted(self._subscriptions))
                         self._bridge = probe
                         return result
                 except (OSError, BridgeError, ProtocolError):
@@ -1698,3 +1810,127 @@ class Document:
                               handles=[e._handle for e in entities])
         self._retire(entities)
         return self._rows(rows)
+
+    # -- push events ------------------------------------------------------------
+    #
+    # Subscribed events arrive as frames on the connection; they are queued
+    # while requests run (bounded, oldest dropped) and handed out by
+    # events(). Nothing is sent before subscribe().
+
+    def subscribe(self, events: list[str] | str = "*") -> list[str]:
+        """Start receiving ``events`` (names, or "*" for all); returns the
+        full subscription. Names: document_modified, selection_changed,
+        entity_count_changed, layer_changed, view_changed, grid_changed,
+        windows_changed, session_ending. All but the last two are polled
+        every 100 ms and report changes only; most need the native layer
+        (on the stub only entity_count_changed and layer_changed fire)."""
+        names = [events] if isinstance(events, str) else list(events)
+        result = self._call_now("subscribe", events=names)
+        self._subscriptions = set(result["subscribed"])
+        return result["subscribed"]
+
+    def unsubscribe(self, events: list[str] | str | None = None) -> list[str]:
+        """Stop receiving ``events`` (all of them when None)."""
+        args: dict[str, Any] = {}
+        if events is not None:
+            args["events"] = [events] if isinstance(events, str) else list(events)
+        result = self._call_now("unsubscribe", **args)
+        self._subscriptions = set(result["subscribed"])
+        return result["subscribed"]
+
+    def on(self, event: str, callback: Any) -> None:
+        """Call ``callback(event_frame)`` for every ``event`` that events()
+        hands out ("*" for all), subscribing to it if needed. Callbacks run
+        inside events(), on the caller's thread."""
+        self._handlers.setdefault(event, []).append(callback)
+        if event != "*" and event not in self._subscriptions:
+            self.subscribe([event])
+
+    def events(self, timeout: float = 0.0) -> list[dict[str, Any]]:
+        """Event frames received so far, waiting up to ``timeout`` seconds
+        for one if none is pending; dispatches each to the on() callbacks.
+
+        Each frame is {"event": name, "seq": n, "data": {...}}; ``seq``
+        counts up through the session, so a gap means frames were dropped
+        from the bounded queue.
+        """
+        self._flush()
+        frames = self._bridge.poll_events(timeout)
+        for frame in frames:
+            for key in (frame.get("event"), "*"):
+                for callback in self._handlers.get(key, []):
+                    callback(frame)
+        return frames
+
+    # -- interactive prompts ------------------------------------------------------
+    #
+    # Each one asks the person at LibreCAD and blocks until they answer -- the
+    # server handles nothing else meanwhile -- so the socket timeout is lifted
+    # for the call. ``timeout`` (seconds) has the plugin cancel the prompt
+    # after that long instead; it needs the native layer. A cancelled prompt
+    # returns None. Point and select prompts end whatever action the user had
+    # running in LibreCAD.
+
+    def _prompt(self, op: str, timeout: float | None,
+                **args: Any) -> dict[str, Any]:
+        self._flush()
+        if timeout is not None:
+            args["timeout_ms"] = max(1, int(round(float(timeout) * 1000)))
+        socket_timeout = None if timeout is None else float(timeout) + 30.0
+        with self._bridge.socket_timeout(socket_timeout):
+            return self._bridge.request(op, **args)
+
+    def prompt_point(self, message: str = "", base: Any = None,
+                     timeout: float | None = None
+                     ) -> tuple[float, float] | None:
+        """Ask for a point: a click in the drawing, or coordinates typed on
+        LibreCAD's command line. ``base`` draws a rubber band from there.
+        None when the user cancels (right click) or ``timeout`` passes."""
+        args: dict[str, Any] = {"message": str(message)}
+        if base is not None:
+            args["base"] = _pt(base)
+        result = self._prompt("prompt_point", timeout, **args)
+        if result.get("cancelled"):
+            return None
+        x, y = result["point"]
+        return (x, y)
+
+    def prompt_select(self, message: str = "",
+                      timeout: float | None = None) -> list[Entity] | None:
+        """Ask the user to select entities and finish with Enter or a right
+        click; returns what is selected then (anything already selected
+        counts), or None when nothing is or ``timeout`` passes."""
+        result = self._prompt("prompt_select", timeout, message=str(message))
+        if result.get("cancelled"):
+            return None
+        return self._rows(result["entities"])
+
+    def prompt_int(self, message: str = "", default: int | None = None,
+                   title: str = "", timeout: float | None = None) -> int | None:
+        """Ask for an integer in a LibreCAD input dialog; None on Cancel."""
+        args: dict[str, Any] = {"message": str(message), "title": str(title)}
+        if default is not None:
+            args["default"] = int(default)
+        result = self._prompt("prompt_int", timeout, **args)
+        return None if result.get("cancelled") else int(result["value"])
+
+    def prompt_real(self, message: str = "", default: float | None = None,
+                    title: str = "", timeout: float | None = None
+                    ) -> float | None:
+        """Ask for a number in a LibreCAD input dialog; None on Cancel."""
+        args: dict[str, Any] = {"message": str(message), "title": str(title)}
+        if default is not None:
+            args["default"] = float(default)
+        result = self._prompt("prompt_real", timeout, **args)
+        return None if result.get("cancelled") else float(result["value"])
+
+    def prompt_string(self, message: str = "", default: str | None = None,
+                      title: str = "", timeout: float | None = None
+                      ) -> str | None:
+        """Ask for a line of text in a LibreCAD input dialog; None on
+        Cancel."""
+        args: dict[str, Any] = {"message": str(message), "title": str(title)}
+        if default is not None:
+            args["default"] = str(default)
+        result = self._prompt("prompt_string", timeout, **args)
+        return None if result.get("cancelled") else str(result["value"])

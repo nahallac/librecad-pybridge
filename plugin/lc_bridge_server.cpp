@@ -7,9 +7,12 @@
 #include "lc_bridge_server.h"
 
 #include "lc_bridge_dispatch.h"
+#include "lc_bridge_events.h"
 
 #include <QEventLoop>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QStringList>
 #include <QUuid>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -56,6 +59,10 @@ BridgeServer::BridgeServer(Document_Interface *doc, NativeBridge *native,
     m_server->setSocketOptions(QLocalServer::UserAccessOption);
     connect(m_server, &QLocalServer::newConnection,
             this, &BridgeServer::onNewConnection);
+
+    m_events = new EventMonitor(doc, native, this);
+    connect(m_events, &EventMonitor::eventRaised,
+            this, &BridgeServer::onEventRaised);
 }
 
 BridgeServer::~BridgeServer()
@@ -115,6 +122,12 @@ int BridgeServer::serve()
 
 void BridgeServer::stop()
 {
+    // A pending prompt spins its own loop inside the current request;
+    // cancel it so that request can answer and the session can end. From
+    // a shutdown request this is a no-op (no prompt is armed then).
+    if (m_native)
+        m_native->cancelPrompt();
+    announceSessionEnding(QStringLiteral("stopped"));
     m_stopping = true;
     if (m_stopLoop)
         m_stopLoop->quit();
@@ -137,6 +150,9 @@ void BridgeServer::onNewConnection()
 
         m_client = pending;
         m_buffer.clear();
+        // Subscriptions are per connection: a new client starts with none.
+        m_events->unsubscribe(QStringList());
+        m_pendingEvents.clear();
         connect(m_client, &QLocalSocket::readyRead,
                 this, &BridgeServer::onReadyRead);
         connect(m_client, &QLocalSocket::disconnected,
@@ -151,6 +167,15 @@ void BridgeServer::onReadyRead()
         return;
     m_buffer += m_client->readAll();
 
+    // A request that runs a nested event loop (a prompt, the hatch dialog)
+    // lets this slot fire again from inside it. Requests are strictly
+    // sequential, so a re-entrant call only buffers; the loop below picks
+    // the new lines up once the current request has answered.
+    if (m_processing)
+        return;
+    m_processing = true;
+    m_events->setSuspended(true);
+
     // Complete lines only; a partial line stays buffered for the next read.
     int newline = -1;
     while (!m_stopping && (newline = m_buffer.indexOf('\n')) >= 0) {
@@ -159,6 +184,9 @@ void BridgeServer::onReadyRead()
         if (!line.trimmed().isEmpty())
             processLine(line);
     }
+
+    m_events->setSuspended(false);
+    m_processing = false;
 }
 
 void BridgeServer::onDisconnected()
@@ -167,6 +195,8 @@ void BridgeServer::onDisconnected()
         socket->deleteLater();
     m_client = nullptr;
     m_buffer.clear();
+    m_events->unsubscribe(QStringList());
+    m_pendingEvents.clear();
     emit clientChanged(false);
     // The server keeps listening: a script may run, exit, and a later script
     // connect again, all within one session (and one undo step).
@@ -192,10 +222,13 @@ void BridgeServer::processLine(const QByteArray &line)
         if (op == QLatin1String("shutdown") || op == QLatin1String("session")
             || op == QLatin1String("file_open") || op == QLatin1String("file_new")
             || op == QLatin1String("activate_document")
-            || op == QLatin1String("file_close")) {
+            || op == QLatin1String("file_close")
+            || op == QLatin1String("subscribe") || op == QLatin1String("unsubscribe")) {
             // Session-level: acknowledged before the loop is told to quit, so
             // the client sees the reply.
             response = sessionRequest(request, &shutdown);
+            if (shutdown)
+                announceSessionEnding(op);
         } else {
             response = m_dispatcher->dispatch(request);
         }
@@ -205,8 +238,47 @@ void BridgeServer::processLine(const QByteArray &line)
     sendToClient(encode(response));
     emit requestHandled(m_requestsHandled);
 
+    // Events raised while the request ran go out after its response.
+    const QList<QByteArray> pending = m_pendingEvents;
+    m_pendingEvents.clear();
+    for (const QByteArray &frame : pending)
+        sendToClient(frame);
+
     if (shutdown)
         stop();
+}
+
+QByteArray BridgeServer::eventFrame(const QString &name, const QJsonObject &data)
+{
+    QJsonObject frame;
+    frame.insert(QStringLiteral("event"), name);
+    frame.insert(QStringLiteral("seq"), ++m_eventSeq);
+    frame.insert(QStringLiteral("data"), data);
+    return encode(frame);
+}
+
+void BridgeServer::onEventRaised(const QString &name, const QJsonObject &data)
+{
+    if (!m_client)
+        return;
+    // Same thread as every response, so a frame can never land inside one;
+    // the queue only keeps the order "response, then what it caused".
+    if (m_processing)
+        m_pendingEvents.append(eventFrame(name, data));
+    else
+        sendToClient(eventFrame(name, data));
+}
+
+void BridgeServer::announceSessionEnding(const QString &reason)
+{
+    if (m_sessionEndingSent || !m_client
+        || !m_events->isSubscribed(QStringLiteral("session_ending"))) {
+        return;
+    }
+    m_sessionEndingSent = true;
+    QJsonObject data;
+    data.insert(QStringLiteral("reason"), reason);
+    sendToClient(eventFrame(QStringLiteral("session_ending"), data));
 }
 
 QJsonObject BridgeServer::sessionRequest(const QJsonObject &request, bool *stopAfter)
@@ -223,6 +295,34 @@ QJsonObject BridgeServer::sessionRequest(const QJsonObject &request, bool *stopA
         result = out;
     } else if (op == QLatin1String("shutdown")) {
         *stopAfter = true;
+    } else if (op == QLatin1String("subscribe") || op == QLatin1String("unsubscribe")) {
+        // "events": a list of names, "*" for all. Subscribing to nothing
+        // just reports the current state.
+        QStringList names;
+        const QJsonValue eventsValue = args.value(QStringLiteral("events"));
+        bool valid = eventsValue.isUndefined() || eventsValue.isArray();
+        for (const QJsonValue &name : eventsValue.toArray()) {
+            valid = valid && name.isString();
+            names.append(name.toString());
+        }
+        QString error;
+        if (!valid) {
+            response = errorResponse(QStringLiteral("bad_args"),
+                                     QStringLiteral("\"events\" must be a list of "
+                                                    "event names"));
+        } else if (op == QLatin1String("unsubscribe")) {
+            m_events->unsubscribe(names);
+        } else if (!m_events->subscribe(names, &error)) {
+            response = errorResponse(QStringLiteral("bad_args"), error);
+        }
+        if (response.isEmpty()) {
+            QJsonObject out;
+            out.insert(QStringLiteral("subscribed"),
+                       QJsonArray::fromStringList(m_events->subscriptions()));
+            out.insert(QStringLiteral("available"),
+                       QJsonArray::fromStringList(EventMonitor::eventNames()));
+            result = out;
+        }
     } else if (!m_native || !m_native->modificationAvailable()) {
         response = errorResponse(
             QStringLiteral("unavailable"),

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 
 from lcbridge import BridgeError, DimStyle, Document, StaleEntityError
 
@@ -155,6 +156,73 @@ def main() -> int:
         check(isinstance(doc.real_to_string(1.5, units=2, precision=1), str),
               "real_to_string formats")
 
+        # -- prompts ----------------------------------------------------------------
+        # The stub answers every prompt with "cancelled" at once. A real
+        # LibreCAD waits for a person, so there only the timeout is tried.
+        on_stub = not doc.native_status()["commands"]
+        if on_stub:
+            check(doc.prompt_point("pick a point", base=(0, 0)) is None,
+                  "prompt_point reports a cancelled prompt as None")
+            check(doc.prompt_select("pick entities") is None,
+                  "prompt_select reports a cancelled prompt as None")
+            check(doc.prompt_int("how many?", default=3) is None
+                  and doc.prompt_real("how far?", default=2.5) is None
+                  and doc.prompt_string("name?", default="x") is None,
+                  "prompt_int/real/string report Cancel as None")
+        else:
+            check(doc.prompt_point("nobody will answer", timeout=0.3) is None
+                  and doc.prompt_int("nobody will answer", timeout=0.3) is None,
+                  "unanswered prompts time out as None")
+        try:
+            doc.bridge.request("prompt_int", default=1.5)
+            check(False, "a non-integer default must be rejected")
+        except BridgeError as error:
+            check(error.code == "bad_args", "prompt_int rejects a fractional default")
+
+        # -- push events ------------------------------------------------------------
+        check(doc.events() == [], "no events before subscribing")
+        subscribed = doc.subscribe("*")
+        check({"entity_count_changed", "layer_changed", "session_ending"}
+              <= set(subscribed), f"subscribe('*') covers every event ({subscribed})")
+        check(doc.events(timeout=0.3) == [],
+              "subscribing reports later changes only")
+        doc.add_line((0, -60), (10, -60))
+        frames = doc.events(timeout=1.0)
+        counts = [f for f in frames if f["event"] == "entity_count_changed"]
+        check(len(counts) == 1
+              and counts[0]["data"]["count"] == counts[0]["data"]["previous"] + 1,
+              f"add_line raises entity_count_changed ({frames})")
+
+        seen: list[dict] = []
+        doc.on("layer_changed", seen.append)
+        doc.set_layer("LC_API_EVENTS")
+        doc.events(timeout=1.0)
+        check(len(seen) == 1 and seen[0]["data"]["current"] == "LC_API_EVENTS"
+              and "LC_API_EVENTS" in seen[0]["data"]["layers"],
+              "on() callback receives layer_changed")
+        check(seen[0]["seq"] > counts[0]["seq"], "event seq counts up")
+
+        # An event written between requests reaches the client ahead of the
+        # next response; request_raw() must queue it, not mistake it.
+        doc.add_line((0, -70), (10, -70))
+        time.sleep(0.4)
+        check(doc.current_layer == "LC_API_EVENTS",
+              "a response read past a queued event frame")
+        check(any(f["event"] == "entity_count_changed" for f in doc.bridge.events),
+              "the event frame was queued in Bridge.events")
+        check(any(f["event"] == "entity_count_changed" for f in doc.events()),
+              "events() hands out the queued frame")
+
+        try:
+            doc.subscribe(["no_such_event"])
+            check(False, "an unknown event name must be rejected")
+        except BridgeError as error:
+            check(error.code == "bad_args", "subscribe rejects unknown names")
+        check(doc.unsubscribe() == [], "unsubscribe() drops everything")
+        doc.add_line((0, -80), (10, -80))
+        check(doc.events(timeout=0.3) == [], "no events after unsubscribe()")
+        doc.set_layer("LC_API_TEST")
+
         # -- native operations --------------------------------------------------
         status = doc.native_status()
         check({"commands", "selection", "reason"} <= set(status),
@@ -218,7 +286,12 @@ def main() -> int:
                          lambda: doc.chamfer(probe, (0, 0), probe, (1, 1), 1),
                          lambda: doc.cut(probe, (0, 0)),
                          lambda: doc.change_attributes([probe], color="bylayer"),
-                         lambda: doc.revert_direction([probe])):
+                         lambda: doc.revert_direction([probe]),
+                         # A prompt timeout is enforced by the native layer.
+                         lambda: doc.prompt_point(timeout=0.5),
+                         lambda: doc.prompt_select(timeout=0.5),
+                         lambda: doc.prompt_int(timeout=0.5),
+                         lambda: doc.prompt_string(timeout=0.5)):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")
@@ -232,7 +305,11 @@ def main() -> int:
         doc.set_layer(base)
 
         if shutdown:
+            doc.subscribe(["session_ending"])
             doc.shutdown()
+            ending = [f for f in doc.events() if f["event"] == "session_ending"]
+            check(len(ending) == 1 and ending[0]["data"]["reason"] == "shutdown",
+                  "shutdown announces session_ending before its response")
             print("session shut down")
 
     print(f"\n{checks} checks passed")
