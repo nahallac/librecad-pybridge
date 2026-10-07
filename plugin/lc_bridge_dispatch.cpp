@@ -19,6 +19,7 @@
 #include <QtMath>
 
 #include <exception>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -627,6 +628,15 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("prompt_int"),           &Dispatcher::opPromptInt},
         {QStringLiteral("prompt_real"),          &Dispatcher::opPromptReal},
         {QStringLiteral("prompt_string"),        &Dispatcher::opPromptString},
+        {QStringLiteral("add_mtext"),            &Dispatcher::opAddMText},
+        {QStringLiteral("add_image"),            &Dispatcher::opAddImage},
+        {QStringLiteral("dim_aligned"),          &Dispatcher::opDimAligned},
+        {QStringLiteral("dim_linear"),           &Dispatcher::opDimLinear},
+        {QStringLiteral("dim_radial"),           &Dispatcher::opDimRadial},
+        {QStringLiteral("dim_diametric"),        &Dispatcher::opDimDiametric},
+        {QStringLiteral("dim_angular"),          &Dispatcher::opDimAngular},
+        {QStringLiteral("dim_leader"),           &Dispatcher::opDimLeader},
+        {QStringLiteral("add_hatch"),            &Dispatcher::opAddHatch},
     };
     return table;
 }
@@ -1096,7 +1106,7 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
         item.insert(QStringLiteral("handle"), registerEntity(entity));
         item.insert(QStringLiteral("type"), typeToName(type));
         if (includeData)
-            item.insert(QStringLiteral("data"), entityDataToJson(type, data));
+            item.insert(QStringLiteral("data"), rowData(entity, type, data));
         result.append(item);
     }
     return result;
@@ -1148,7 +1158,7 @@ QJsonValue Dispatcher::opEntityData(const QJsonObject &args)
 
     QJsonObject result;
     result.insert(QStringLiteral("type"), typeToName(type));
-    result.insert(QStringLiteral("data"), entityDataToJson(type, data));
+    result.insert(QStringLiteral("data"), rowData(entity, type, data));
     return result;
 }
 
@@ -1407,7 +1417,7 @@ QJsonArray Dispatcher::newEntitiesSince(const QSet<const void *> &before)
         QJsonObject item;
         item.insert(QStringLiteral("handle"), registerEntity(entity));
         item.insert(QStringLiteral("type"), typeToName(type));
-        item.insert(QStringLiteral("data"), entityDataToJson(type, data));
+        item.insert(QStringLiteral("data"), rowData(entity, type, data));
         result.append(item);
     }
     return result;
@@ -2962,6 +2972,299 @@ QJsonValue Dispatcher::opPromptString(const QJsonObject &args)
     if (!answered || cancelled)
         return promptCancelled(cancelled);
     return promptAnswer(QStringLiteral("value"), value);
+}
+
+// Creation through the engine (roadmap item 2). The plugin API cannot make
+// MTEXT (Doc_plugin_interface::addMText is not part of Document_Interface),
+// IMAGE, HATCH, or any dimension; these build them in the native layer the
+// way LibreCAD's own actions do, without the command line. Each returns the
+// created entity as a one-row get_entities result.
+// --------------------------------------------------------------------------
+
+QJsonObject Dispatcher::rowData(Plug_Entity *entity, int type,
+                                const QHash<int, QVariant> &data) const
+{
+    QJsonObject out = entityDataToJson(type, data);
+    QVariantMap details;
+    if (m_native && m_native->entityDetails(entity, &details)) {
+        const QJsonObject extra = QJsonObject::fromVariantMap(details);
+        for (auto it = extra.constBegin(); it != extra.constEnd(); ++it) {
+            if (!out.contains(it.key()))
+                out.insert(it.key(), it.value());
+        }
+    }
+    return out;
+}
+
+Plug_Entity *Dispatcher::lookupEntityArg(const QJsonObject &args,
+                                         const QString &name) const
+{
+    QJsonObject lookup;
+    lookup.insert(QStringLiteral("handle"), requireValue(args, name));
+    return lookupEntity(lookup);
+}
+
+namespace {
+
+//! Dimension label override: absent or "" for the measured value.
+QString dimensionText(const QJsonObject &args)
+{
+    return optionalString(args, QStringLiteral("text"), QString());
+}
+
+//! The two end points of a line argument: a handle of a LINE entity, or
+//! [[x1, y1], [x2, y2]].
+void lineArg(const QJsonObject &args, const QString &name,
+             const std::function<Plug_Entity *(const QJsonObject &)> &lookup,
+             QPointF *start, QPointF *end)
+{
+    const QJsonValue value = requireValue(args, name);
+    if (value.isDouble()) {
+        QJsonObject handle;
+        handle.insert(QStringLiteral("handle"), value);
+        Plug_Entity *entity = lookup(handle);
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        const int type = data.value(DPI::ETYPE, DPI::UNKNOWN).toInt();
+        if (type != DPI::LINE) {
+            badArgs(QStringLiteral("\"%1\" is a %2, not a LINE")
+                        .arg(name, typeToName(type)));
+        }
+        *start = QPointF(data.value(DPI::STARTX).toDouble(),
+                         data.value(DPI::STARTY).toDouble());
+        *end = QPointF(data.value(DPI::ENDX).toDouble(),
+                       data.value(DPI::ENDY).toDouble());
+        return;
+    }
+    const QJsonArray pair = value.toArray();
+    if (!value.isArray() || pair.size() != 2) {
+        badArgs(QStringLiteral("\"%1\" must be a LINE handle or "
+                               "[[x1, y1], [x2, y2]]").arg(name));
+    }
+    *start = pointFromJson(pair.at(0), QStringLiteral("\"%1\"[0]").arg(name));
+    *end = pointFromJson(pair.at(1), QStringLiteral("\"%1\"[1]").arg(name));
+}
+
+} // namespace
+
+QJsonValue Dispatcher::opAddMText(const QJsonObject &args)
+{
+    requireModification();
+    const QString text = requireString(args, QStringLiteral("text"));
+    const QPointF at = requirePoint(args, QStringLiteral("at"));
+    const double height = requireNumber(args, QStringLiteral("height"));
+    const double angle = optionalNumber(args, QStringLiteral("angle"), 0.0);
+    const QString style = optionalString(args, QStringLiteral("style"),
+                                         QStringLiteral("standard"));
+    const double width = optionalNumber(args, QStringLiteral("width"), 100.0);
+    const double lineSpacing =
+        optionalNumber(args, QStringLiteral("line_spacing"), 1.0);
+    const DPI::HAlign halign = halignFromJson(args);
+    // Same names as add_text, but top by default: an MTEXT hangs from its
+    // insertion point, as LibreCAD's MText tool places it.
+    const DPI::VAlign valign = args.contains(QStringLiteral("valign"))
+                                   ? valignFromJson(args) : DPI::VAlignTop;
+    if (height <= 0.0)
+        badArgs(QStringLiteral("\"height\" must be positive"));
+    if (width <= 0.0)
+        badArgs(QStringLiteral("\"width\" must be positive"));
+    if (lineSpacing <= 0.0)
+        badArgs(QStringLiteral("\"line_spacing\" must be positive"));
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->addMText(text, style, at, height, width, angle, halign,
+                            valign, lineSpacing)) {
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    }
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opAddImage(const QJsonObject &args)
+{
+    requireModification();
+    const QString path = requireString(args, QStringLiteral("path"));
+    const QPointF at = requirePoint(args, QStringLiteral("at"));
+    const double angle = optionalNumber(args, QStringLiteral("angle"), 0.0);
+    const int brightness =
+        static_cast<int>(optionalNumber(args, QStringLiteral("brightness"), 50));
+    const int contrast =
+        static_cast<int>(optionalNumber(args, QStringLiteral("contrast"), 50));
+    const int fade = static_cast<int>(optionalNumber(args, QStringLiteral("fade"), 0));
+    if (QFileInfo(path).isRelative()) {
+        // LibreCAD's working directory is not the client's.
+        badArgs(QStringLiteral("\"path\" must be absolute"));
+    }
+    for (int value : {brightness, contrast, fade}) {
+        if (value < 0 || value > 100)
+            badArgs(QStringLiteral("brightness, contrast and fade are 0..100"));
+    }
+
+    // Size: drawing units per pixel ("scale", the image action's factor,
+    // default 1), or the width or height the whole image should have.
+    int sizing = 0;
+    for (const char *name : {"scale", "width", "height"})
+        sizing += args.contains(QLatin1String(name)) ? 1 : 0;
+    if (sizing > 1)
+        badArgs(QStringLiteral("give at most one of \"scale\", \"width\", \"height\""));
+    QSize pixels;
+    if (!m_native->imagePixelSize(path, &pixels)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("cannot read an image from \"%1\"")
+                               .arg(path));
+    }
+    double scale = optionalNumber(args, QStringLiteral("scale"), 1.0);
+    if (args.contains(QStringLiteral("width")))
+        scale = requireNumber(args, QStringLiteral("width")) / pixels.width();
+    if (args.contains(QStringLiteral("height")))
+        scale = requireNumber(args, QStringLiteral("height")) / pixels.height();
+    if (!(scale > 0.0))
+        badArgs(QStringLiteral("the image size must be positive"));
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->addImage(path, at, scale, angle, brightness, contrast, fade))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opDimAligned(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF p1 = requirePoint(args, QStringLiteral("p1"));
+    const QPointF p2 = requirePoint(args, QStringLiteral("p2"));
+    const QPointF dimLine = requirePoint(args, QStringLiteral("dimline"));
+    if (p1 == p2)
+        badArgs(QStringLiteral("\"p1\" and \"p2\" must differ"));
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->dimAligned(p1, p2, dimLine, dimensionText(args)))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opDimLinear(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF p1 = requirePoint(args, QStringLiteral("p1"));
+    const QPointF p2 = requirePoint(args, QStringLiteral("p2"));
+    const QPointF dimLine = requirePoint(args, QStringLiteral("dimline"));
+    const double angle = optionalNumber(args, QStringLiteral("angle"), 0.0);
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->dimLinear(p1, p2, dimLine, angle, dimensionText(args)))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::radialDimension(const QJsonObject &args, bool diametric)
+{
+    requireModification();
+    // The circle: a CIRCLE or ARC entity, or a centre and radius.
+    QPointF center;
+    double radius = 0.0;
+    if (args.contains(QStringLiteral("entity"))) {
+        Plug_Entity *entity = lookupEntityArg(args, QStringLiteral("entity"));
+        QHash<int, QVariant> data;
+        entity->getData(&data);
+        const int type = data.value(DPI::ETYPE, DPI::UNKNOWN).toInt();
+        if (type != DPI::CIRCLE && type != DPI::ARC) {
+            badArgs(QStringLiteral("\"entity\" is a %1, not a CIRCLE or ARC")
+                        .arg(typeToName(type)));
+        }
+        center = QPointF(data.value(DPI::STARTX).toDouble(),
+                         data.value(DPI::STARTY).toDouble());
+        radius = data.value(DPI::RADIUS).toDouble();
+    } else {
+        center = requirePoint(args, QStringLiteral("center"));
+        radius = requireNumber(args, QStringLiteral("radius"));
+    }
+    if (radius <= 0.0)
+        badArgs(QStringLiteral("the radius must be positive"));
+    const double angle = optionalNumber(args, QStringLiteral("angle"), M_PI / 4.0);
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->dimRadial(center, radius, angle, dimensionText(args), diametric))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opDimRadial(const QJsonObject &args)
+{
+    return radialDimension(args, false);
+}
+
+QJsonValue Dispatcher::opDimDiametric(const QJsonObject &args)
+{
+    return radialDimension(args, true);
+}
+
+QJsonValue Dispatcher::opDimAngular(const QJsonObject &args)
+{
+    requireModification();
+    const auto lookup = [this](const QJsonObject &handle) {
+        return lookupEntity(handle);
+    };
+    QPointF l1a, l1b, l2a, l2b;
+    lineArg(args, QStringLiteral("line1"), lookup, &l1a, &l1b);
+    lineArg(args, QStringLiteral("line2"), lookup, &l2a, &l2b);
+    const QPointF dimLine = requirePoint(args, QStringLiteral("dimline"));
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->dimAngular(l1a, l1b, l2a, l2b, dimLine, dimensionText(args)))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opDimLeader(const QJsonObject &args)
+{
+    requireModification();
+    const std::vector<QPointF> points = requirePoints(args, QStringLiteral("points"), 2);
+    const bool arrow = optionalBool(args, QStringLiteral("arrow"), true);
+
+    QList<QPointF> list;
+    for (const QPointF &point : points)
+        list.append(point);
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->dimLeader(list, arrow))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opAddHatch(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    const QString pattern = optionalString(args, QStringLiteral("pattern"),
+                                           QStringLiteral("ANSI31"));
+    const double scale = optionalNumber(args, QStringLiteral("scale"), 1.0);
+    const double angle = optionalNumber(args, QStringLiteral("angle"), 0.0);
+    const bool solid = optionalBool(args, QStringLiteral("solid"), false);
+    if (!(scale > 0.0))
+        badArgs(QStringLiteral("\"scale\" must be positive"));
+
+    // The hatch action drops texts, points, dimensions and hatches from the
+    // selection before it builds the loop; only outline geometry is taken.
+    static const QList<int> boundaryTypes{
+        DPI::LINE, DPI::ARC, DPI::CIRCLE, DPI::ELLIPSE, DPI::POLYLINE,
+        DPI::SPLINE, DPI::SPLINEPOINTS};
+    QList<Plug_Entity *> boundary;
+    for (int i = 0; i < handles.size(); ++i) {
+        if (!handles.at(i).isDouble())
+            badArgs(QStringLiteral("\"handles\"[%1] must be a number").arg(i));
+        QJsonObject lookup;
+        lookup.insert(QStringLiteral("handle"), handles.at(i));
+        Plug_Entity *entity = lookupEntity(lookup);
+        const int type = readEntityType(entity);
+        if (!boundaryTypes.contains(type)) {
+            badArgs(QStringLiteral("\"handles\"[%1] is a %2, which cannot bound "
+                                   "a hatch").arg(i).arg(typeToName(type)));
+        }
+        boundary.append(entity);
+    }
+
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->addHatch(boundary, pattern, scale, angle, solid))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    return newEntitiesSince(before);
 }
 
 } // namespace lcbridge
