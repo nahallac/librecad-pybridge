@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lcbridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python client for the LibreCAD scripting bridge (librecad-pybridge)"
 readme = {text = "Client for the librecad-pybridge LibreCAD plugin: drive the live drawing over a local socket. See https://github.com/nahallac/librecad-pybridge", content-type = "text/markdown"}
 requires-python = ">=3.10"

@@ -12,7 +12,7 @@
 QT          += core gui widgets network printsupport
 TEMPLATE     = lib
 CONFIG      += plugin c++17
-VERSION      = 0.2.0
+VERSION      = 0.3.0
 TARGET       = $$qtLibraryTarget(lc_pybridge)
 
 lessThan(QT_MAJOR_VERSION, 5)|greaterThan(QT_MAJOR_VERSION, 5) {

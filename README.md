@@ -9,10 +9,13 @@ what has been established about LibreCAD's plugin API and internals, with eviden
 
 **Status: in use.** A Qt5 C++ plugin exposes LibreCAD as a table of named JSON operations over a
 Unix domain socket; a stdlib-only Python client wraps it (`Document`, `Entity`). The plugin API
-(`Document_Interface`) covers geometry and layers; everything beyond it — dimensions, hatches,
-selection reads, offset/mirror/trim/explode, undo steps, save/open — comes from a *native layer*
-compiled against LibreCAD's own source, version-gated at runtime. Validated against LibreCAD
-2.2.1.5 on Arch; other agents drive real floorplan work through it.
+(`Document_Interface`) covers geometry and layers; everything beyond it — real dimensions of every
+kind, MTEXT, images, hatches, selection reads, the modify tools (offset, mirror, trim, explode,
+move/rotate/scale with copies, stretch, fillet, chamfer, cut, bulk attributes), undo steps,
+save/open/close and switching documents, layer state, block definition, geometry queries, zoom,
+PNG/SVG/PDF export, blocking prompts and push events — comes from a *native layer* compiled
+against LibreCAD's own source, version-gated at runtime. Validated against LibreCAD 2.2.1.5 on
+Arch; other agents drive real floorplan work through it.
 
 **When not to use it:** to *generate* a DXF with no one looking, write the file with `ezdxf` and
 open it in LibreCAD. The bridge is for interacting with the running application: seeing results
