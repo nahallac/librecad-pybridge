@@ -37,6 +37,7 @@
 #include <QPointF>
 #include <QSize>
 #include <QSizeF>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -344,8 +345,99 @@ public:
     bool exportPdf(const QString &path, const QString &paper, int landscape,
                    bool fitToPage, int *pages, QSizeF *paperMm);
 
+    // --- Modify tools: the rest of RS_Modification --------------------------
+    // Like offset/mirror/explode, the transforms act on the current selection.
+    // \a copies follows RS_Modification's "number": 0 transforms the
+    // originals (they are replaced by transformed clones); n >= 1 keeps them
+    // and adds n copies at 1x, 2x, ... nx the transformation.
+    //! Move the selection by \a offset.
+    bool move(const QPointF &offset, int copies, bool useCurrentLayer,
+              bool useCurrentAttributes);
+    //! Rotate the selection by \a angle radians around \a center.
+    bool rotate(const QPointF &center, double angle, int copies,
+                bool useCurrentLayer, bool useCurrentAttributes);
+    //! Scale the selection around \a center by (factor.x, factor.y). Unequal
+    //! factors turn circles and arcs into ellipses, as in the GUI.
+    bool scale(const QPointF &center, const QPointF &factor, int copies,
+               bool useCurrentLayer, bool useCurrentAttributes);
+    //! Move by \a offset, then rotate by \a angle around the moved \a center
+    //! (RS_MoveRotateData::referencePoint).
+    bool moveRotate(const QPointF &offset, const QPointF &center, double angle,
+                    int copies, bool useCurrentLayer, bool useCurrentAttributes);
+    //! Rotate by \a angle1 around \a center1, then by \a angle2 around
+    //! \a center2 (itself carried along by the first rotation).
+    bool rotate2(const QPointF &center1, const QPointF &center2,
+                 double angle1, double angle2, int copies,
+                 bool useCurrentLayer, bool useCurrentAttributes);
+    //! Stretch everything visible and unlocked that lies in, or has an
+    //! endpoint in, the window \a firstCorner-\a secondCorner by \a offset.
+    //! Works on the whole document, not the selection -- but the engine
+    //! removes every selected entity afterwards, so the caller must clear
+    //! the selection first.
+    bool stretch(const QPointF &firstCorner, const QPointF &secondCorner,
+                 const QPointF &offset);
+    //! Fillet the corner between two atomic entities. \a point1 and \a point2
+    //! pick the part of each entity to keep; \a corner says on which side of
+    //! both entities the arc goes (the GUI passes its second click). \a trim
+    //! replaces both entities with trimmed clones.
+    bool round(Plug_Entity *entity1, const QPointF &point1,
+               Plug_Entity *entity2, const QPointF &point2,
+               const QPointF &corner, double radius, bool trim);
+    //! Chamfer the corner between two atomic entities, \a length1 along the
+    //! first and \a length2 along the second.
+    bool bevel(Plug_Entity *entity1, const QPointF &point1,
+               Plug_Entity *entity2, const QPointF &point2,
+               double length1, double length2, bool trim);
+    //! Split an atomic entity at the point on it nearest \a point. A circle
+    //! becomes one full-turn arc starting there; anything else two pieces.
+    bool cut(Plug_Entity *entity, const QPointF &point);
+    //! What changeAttributes() sets. Names use the plugin API's spellings
+    //! ("0.25mm", "DashLine", "BYLAYER"); color is the plugin API's int
+    //! (-1 ByLayer, -2 ByBlock, else 24-bit RGB).
+    struct AttributeChange
+    {
+        bool changeLayer {false};
+        QString layer;
+        bool changeColor {false};
+        int color {-1};
+        bool changeLineType {false};
+        QString lineType;
+        bool changeWidth {false};
+        QString width;
+    };
+    //! Whether changeAttributes() knows a line type / line width name, so
+    //! the dispatcher can reject a typo as bad arguments up front.
+    static bool isLineTypeName(const QString &name);
+    static bool isLineWidthName(const QString &name);
+    //! Apply \a change to every selected entity; each is replaced by a clone.
+    bool changeAttributes(const AttributeChange &change);
+    //! Reverse the direction of every selected entity (start <-> end); each
+    //! is replaced by a clone.
+    bool revertDirection();
+
+    //! Undo-cycle hygiene for operations that replace entities.
+    //! RS_UndoCycle keeps its undoables in a std::set, so an entity that is
+    //! created and then replaced (marked undone) within one cycle is listed
+    //! once, and undo toggles it back to life -- the entity reappears. A
+    //! GUI action is its own cycle, so LibreCAD never meets this; a bridge
+    //! session is one long cycle and does. Call this before an operation
+    //! replaces \a replaced: if any of them was created in the current
+    //! cycle, the cycle is closed and a fresh one opened, so the operation
+    //! becomes an undo step of its own. Otherwise nothing happens and the
+    //! session stays one step.
+    void isolateReplacement(const QList<Plug_Entity *> &replaced);
+    //! The same for stretch, which picks what it replaces by window: every
+    //! visible, unlocked entity inside the window or with an endpoint in it.
+    void isolateStretch(const QPointF &firstCorner, const QPointF &secondCorner);
+
 private:
     void pollForHatchDialog();
+    //! Remember which entities exist as the current undo cycle opens; see
+    //! isolateReplacement().
+    void snapshotCycleStart();
+    //! Close the current undo cycle and open the next one.
+    void splitUndoCycle();
+    QSet<const void *> m_cycleStartKeys;
 
     bool m_versionOk {false};
     QG_CommandWidget *m_commandWidget {nullptr};

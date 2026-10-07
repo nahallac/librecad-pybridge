@@ -150,6 +150,30 @@ doc.mirror([wall, inner], (2000, 0), (2000, 1), copy=True)
 kept, = doc.trim(wall, trim_point=(10, 0), limit=inner, limit_point=(500, 0))
 ```
 
+**More modify tools**, the same way: `doc.move()`, `rotate()`, `scale()`, `move_rotate()`,
+`rotate2()` take a list of entities and `copies=0` (transform the originals, which are replaced
+and go stale) or `copies=n` (keep them, add n copies at 1x ... nx the transformation) — unlike
+`Entity.move()/rotate()/scale()`, which go through the plugin API, keep the handle, and make no
+copies. `doc.stretch(corner1, corner2, offset)` works on the drawing by window, like the GUI
+tool (handles of stretched entities die on the server; re-fetch). `doc.fillet(e1, p1, e2, p2,
+radius)` and `doc.chamfer(e1, p1, e2, p2, length1, length2)` round or bevel a corner (`p1`/`p2`
+on the parts to keep; `trim=True` by default; fillet's optional `corner` point picks the side,
+default the midpoint of `p1` and `p2`). `doc.cut(entity, point)` splits a line/arc/ellipse in two
+(a circle becomes one arc). `doc.change_attributes(entities, layer=, color=, width=, linetype=)`
+takes entity-data formats (`color` also `"bylayer"`/`"byblock"`; `width` like `"0.25mm"`), and
+`doc.revert_direction(entities)` swaps start and end. All return the entities they created.
+
+```python
+ring = doc.rotate([door], center=(0, 0), angle=math.pi / 6, copies=11)   # 11 copies
+arc, *trimmed = doc.fillet(h, (800, 0), v, (0, 800), radius=100)
+doc.change_attributes(trimmed, color=0xFF0000, linetype="DashLine")
+```
+
+One undo subtlety these ops handle for you: LibreCAD's undo cycle stores its entities in a set,
+so an entity created and then replaced inside one undo step would come back on undo. The modify
+ops therefore start an undo step of their own when (and only when) they replace an entity that
+was created in the current step — draw-then-fillet is two undo steps.
+
 **Files and undo:**
 
 ```python
@@ -331,6 +355,7 @@ Conventions, uniform across every operation:
 | View* | `get_view` (`view`), `zoom_auto`, `zoom_window`, `zoom_in`, `zoom_out`, `zoom_pan`, `zoom_previous`, `zoom_page`, `set_view` |
 | Documents* | `list_documents` (`documents`); server-level: `activate_document`, `file_close` (`close_document`) |
 | Export* | `export_image`, `export_pdf` |
+| More modify* | `mod_move` (`move`), `mod_rotate` (`rotate`), `mod_scale` (`scale`), `mod_move_rotate` (`move_rotate`), `mod_rotate2` (`rotate2`), `mod_stretch` (`stretch`), `mod_round` (`fillet`), `mod_bevel` (`chamfer`), `mod_cut` (`cut`), `mod_change_attributes` (`change_attributes`), `mod_revert_direction` (`revert_direction`) |
 
 \* native layer; `unavailable` on a version mismatch or the stub.
 
@@ -403,8 +428,10 @@ otherwise LibreCAD's first-run dialog blocks the headless start and `launch()` t
 
 Still missing, roughly in order of value:
 
-- Remaining modify tools through `RS_Modification`: move/rotate/scale with copies, stretch,
-  fillet (round), chamfer (bevel), cut, bulk attribute change, revert direction.
+- The plugin-API edits (`entity_update`, `entity_remove`, `entity_move`/`rotate`/`scale`) still
+  have the undo ghost the modify ops avoid: edit an entity drawn in the same undo step, undo,
+  and the original comes back. `NativeBridge::isolateReplacement()` is the fix; whether those
+  ops should split undo steps is a design call (see findings, 2026-10-06).
 - Creation gaps: `add_mtext` (the plugin API has `addMText`, unwrapped), `add_image`, the other
   dimension kinds (radial, diametric, angular, leader) through the command line.
 - Queries across sessions: entity ids are per process (they are not stored in the file).

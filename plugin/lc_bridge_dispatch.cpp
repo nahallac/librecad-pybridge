@@ -611,6 +611,17 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("list_documents"),       &Dispatcher::opListDocuments},
         {QStringLiteral("export_image"),         &Dispatcher::opExportImage},
         {QStringLiteral("export_pdf"),           &Dispatcher::opExportPdf},
+        {QStringLiteral("mod_move"),             &Dispatcher::opModMove},
+        {QStringLiteral("mod_rotate"),           &Dispatcher::opModRotate},
+        {QStringLiteral("mod_scale"),            &Dispatcher::opModScale},
+        {QStringLiteral("mod_move_rotate"),      &Dispatcher::opModMoveRotate},
+        {QStringLiteral("mod_rotate2"),          &Dispatcher::opModRotate2},
+        {QStringLiteral("mod_stretch"),          &Dispatcher::opModStretch},
+        {QStringLiteral("mod_round"),            &Dispatcher::opModRound},
+        {QStringLiteral("mod_bevel"),            &Dispatcher::opModBevel},
+        {QStringLiteral("mod_cut"),              &Dispatcher::opModCut},
+        {QStringLiteral("mod_change_attributes"), &Dispatcher::opModChangeAttributes},
+        {QStringLiteral("mod_revert_direction"), &Dispatcher::opModRevertDirection},
     };
     return table;
 }
@@ -1585,6 +1596,8 @@ QJsonValue Dispatcher::opModOffset(const QJsonObject &args)
     if (count < 1)
         badArgs(QStringLiteral("\"count\" must be at least 1"));
 
+    if (!keepOriginal)
+        isolateReplacement(handles);
     const QSet<const void *> before = entityKeys();
     selectHandles(handles);
     if (!m_native->offset(side, distance, count, keepOriginal,
@@ -1606,6 +1619,8 @@ QJsonValue Dispatcher::opModMirror(const QJsonObject &args)
     if (p1 == p2)
         badArgs(QStringLiteral("the mirror axis needs two distinct points"));
 
+    if (!copy)
+        isolateReplacement(handles);
     const QSet<const void *> before = entityKeys();
     selectHandles(handles);
     if (!m_native->mirror(p1, p2, copy))
@@ -1621,6 +1636,8 @@ QJsonValue Dispatcher::opModExplode(const QJsonObject &args)
     const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
     const bool remove = optionalBool(args, QStringLiteral("remove"), true);
 
+    if (remove)
+        isolateReplacement(handles);
     const QSet<const void *> before = entityKeys();
     selectHandles(handles);
     if (!m_native->explode(remove))
@@ -1642,6 +1659,8 @@ QJsonValue Dispatcher::opModTrim(const QJsonObject &args)
     const QPointF limitPoint = requirePoint(args, QStringLiteral("limit_point"));
     const bool both = optionalBool(args, QStringLiteral("both"), false);
 
+    m_native->isolateReplacement(both ? QList<Plug_Entity *>{toTrim, limit}
+                                      : QList<Plug_Entity *>{toTrim});
     const QSet<const void *> before = entityKeys();
     if (!m_native->trim(toTrim, trimPoint, limit, limitPoint, both))
         throw RequestError(QStringLiteral("failed"), m_native->lastError());
@@ -1832,6 +1851,14 @@ QJsonValue Dispatcher::opCmdHatch(const QJsonObject &args)
 
 // --------------------------------------------------------------------------
 // Layer state, block definition, geometry queries
+// Modify tools: the rest of RS_Modification
+//
+// Same shape as mod_offset: the entity identities are snapshotted, the engine
+// runs its own modify code, entities it replaced lose their handles, and the
+// entities it created come back as get_entities rows. "copies" is
+// RS_Modification's "number": 0 transforms the originals (the engine replaces
+// them with transformed clones, so their handles die); n >= 1 keeps them and
+// adds n copies at 1x, 2x, ... nx the transformation.
 // --------------------------------------------------------------------------
 
 namespace {
@@ -1867,6 +1894,39 @@ QList<int> typesFromArgs(const QJsonObject &args)
         wanted.append(type);
     }
     return wanted;
+}
+
+int copiesArg(const QJsonObject &args)
+{
+    const QJsonValue value = args.value(QStringLiteral("copies"));
+    if (value.isUndefined() || value.isNull())
+        return 0;
+    if (!value.isDouble() || value.toDouble() != qFloor(value.toDouble())
+        || value.toDouble() < 0) {
+        badArgs(QStringLiteral("\"copies\" must be a whole number >= 0"));
+    }
+    return value.toInt();
+}
+
+//! A color as entity data spells it (-1 ByLayer, -2 ByBlock, else 24-bit
+//! RGB), or the names "bylayer" / "byblock".
+int colorArg(const QJsonValue &value)
+{
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        if (number != qFloor(number) || number < -2 || number > 0xFFFFFF)
+            badArgs(QStringLiteral("\"color\" must be -1, -2, or 0..0xFFFFFF"));
+        return static_cast<int>(number);
+    }
+    if (value.isString()) {
+        const QString name = value.toString();
+        if (name.compare(QLatin1String("bylayer"), Qt::CaseInsensitive) == 0)
+            return -1;
+        if (name.compare(QLatin1String("byblock"), Qt::CaseInsensitive) == 0)
+            return -2;
+    }
+    badArgs(QStringLiteral("\"color\" must be an RGB integer, -1, -2, "
+                           "\"bylayer\", or \"byblock\""));
 }
 
 } // namespace
@@ -2419,6 +2479,289 @@ QJsonValue Dispatcher::opExportPdf(const QJsonObject &args)
     result.insert(QStringLiteral("paper_mm"),
                   QJsonArray{paperMm.width(), paperMm.height()});
     return result;
+}
+
+Plug_Entity *Dispatcher::lookupNamedEntity(const QJsonObject &args,
+                                           const QString &name) const
+{
+    QJsonObject lookup;
+    lookup.insert(QStringLiteral("handle"), requireValue(args, name));
+    return lookupEntity(lookup);
+}
+
+void Dispatcher::isolateReplacement(const QJsonArray &handles)
+{
+    QList<Plug_Entity *> entities;
+    for (int i = 0; i < handles.size(); ++i) {
+        if (!handles.at(i).isDouble())
+            badArgs(QStringLiteral("\"handles\"[%1] must be a number").arg(i));
+        QJsonObject lookup;
+        lookup.insert(QStringLiteral("handle"), handles.at(i));
+        entities.append(lookupEntity(lookup));
+    }
+    m_native->isolateReplacement(entities);
+}
+
+template <typename Apply>
+QJsonValue Dispatcher::runSelectionTransform(const QJsonObject &args,
+                                             int copies, Apply apply)
+{
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    if (copies == 0)
+        isolateReplacement(handles);
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!apply())
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    if (copies == 0)
+        invalidateHandles(handles);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModMove(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF offset = requirePoint(args, QStringLiteral("offset"));
+    const int copies = copiesArg(args);
+    const bool layer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool attributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    return runSelectionTransform(args, copies, [&] {
+        return m_native->move(offset, copies, layer, attributes);
+    });
+}
+
+QJsonValue Dispatcher::opModRotate(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF center = requirePoint(args, QStringLiteral("center"));
+    const double angle = requireNumber(args, QStringLiteral("angle"));
+    const int copies = copiesArg(args);
+    const bool layer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool attributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    return runSelectionTransform(args, copies, [&] {
+        return m_native->rotate(center, angle, copies, layer, attributes);
+    });
+}
+
+QJsonValue Dispatcher::opModScale(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF center = requirePoint(args, QStringLiteral("center"));
+    // A single number scales uniformly; [sx, sy] scales per axis (which turns
+    // circles and arcs into ellipses when sx != sy, as in the GUI).
+    const QJsonValue factorValue = requireValue(args, QStringLiteral("factor"));
+    const QPointF factor = factorValue.isDouble()
+        ? QPointF(factorValue.toDouble(), factorValue.toDouble())
+        : pointFromJson(factorValue, QStringLiteral("factor"));
+    if (factor.x() == 0.0 || factor.y() == 0.0)
+        badArgs(QStringLiteral("\"factor\" must not be zero"));
+    const int copies = copiesArg(args);
+    const bool layer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool attributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    return runSelectionTransform(args, copies, [&] {
+        return m_native->scale(center, factor, copies, layer, attributes);
+    });
+}
+
+QJsonValue Dispatcher::opModMoveRotate(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF offset = requirePoint(args, QStringLiteral("offset"));
+    const QPointF center = requirePoint(args, QStringLiteral("center"));
+    const double angle = requireNumber(args, QStringLiteral("angle"));
+    const int copies = copiesArg(args);
+    const bool layer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool attributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    return runSelectionTransform(args, copies, [&] {
+        return m_native->moveRotate(offset, center, angle, copies, layer,
+                                    attributes);
+    });
+}
+
+QJsonValue Dispatcher::opModRotate2(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF center1 = requirePoint(args, QStringLiteral("center1"));
+    const QPointF center2 = requirePoint(args, QStringLiteral("center2"));
+    const double angle1 = requireNumber(args, QStringLiteral("angle1"));
+    const double angle2 = requireNumber(args, QStringLiteral("angle2"));
+    const int copies = copiesArg(args);
+    const bool layer = optionalBool(args, QStringLiteral("use_current_layer"), false);
+    const bool attributes =
+        optionalBool(args, QStringLiteral("use_current_attributes"), false);
+    return runSelectionTransform(args, copies, [&] {
+        return m_native->rotate2(center1, center2, angle1, angle2, copies,
+                                 layer, attributes);
+    });
+}
+
+QJsonValue Dispatcher::opModStretch(const QJsonObject &args)
+{
+    requireModification();
+    const QPointF first = requirePoint(args, QStringLiteral("first_corner"));
+    const QPointF second = requirePoint(args, QStringLiteral("second_corner"));
+    const QPointF offset = requirePoint(args, QStringLiteral("offset"));
+
+    m_native->isolateStretch(first, second);
+    // Stretch picks its entities by window, not by handle, and replaces every
+    // one it touches with a stretched clone. Which handles died is read off
+    // afterwards: the ones whose entity was live before and is undone now.
+    QList<int> live;
+    for (auto it = m_entities.constBegin(); it != m_entities.constEnd(); ++it) {
+        if (!isUndone(it.value()))
+            live.append(it.key());
+    }
+    const QSet<const void *> before = entityKeys();
+    // RS_Modification::stretch selects what it clones and then removes
+    // *everything* selected, so a leftover selection would be deleted.
+    selectAll(false);
+    if (!m_native->stretch(first, second, offset))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    QJsonArray replaced;
+    for (int handle : live) {
+        if (isUndone(m_entities.value(handle)))
+            replaced.append(handle);
+    }
+    invalidateHandles(replaced);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModRound(const QJsonObject &args)
+{
+    requireModification();
+    Plug_Entity *entity1 = lookupNamedEntity(args, QStringLiteral("entity1"));
+    Plug_Entity *entity2 = lookupNamedEntity(args, QStringLiteral("entity2"));
+    const QPointF point1 = requirePoint(args, QStringLiteral("point1"));
+    const QPointF point2 = requirePoint(args, QStringLiteral("point2"));
+    const double radius = requireNumber(args, QStringLiteral("radius"));
+    const bool trim = optionalBool(args, QStringLiteral("trim"), true);
+    if (radius <= 0.0)
+        badArgs(QStringLiteral("\"radius\" must be positive"));
+    // RS_Modification::round places the arc on the side of both entities
+    // where "corner" lies (it offsets each entity toward it). The GUI passes
+    // its second click; the midpoint of the two picks is inside the corner
+    // whenever the picks are on the kept parts, which is what they mean.
+    const QPointF corner = args.contains(QStringLiteral("corner"))
+        ? requirePoint(args, QStringLiteral("corner"))
+        : (point1 + point2) / 2.0;
+
+    const QJsonArray pair{args.value(QStringLiteral("entity1")),
+                          args.value(QStringLiteral("entity2"))};
+    if (trim)
+        isolateReplacement(pair);
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->round(entity1, point1, entity2, point2, corner, radius, trim))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    if (trim)
+        invalidateHandles(pair);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModBevel(const QJsonObject &args)
+{
+    requireModification();
+    Plug_Entity *entity1 = lookupNamedEntity(args, QStringLiteral("entity1"));
+    Plug_Entity *entity2 = lookupNamedEntity(args, QStringLiteral("entity2"));
+    const QPointF point1 = requirePoint(args, QStringLiteral("point1"));
+    const QPointF point2 = requirePoint(args, QStringLiteral("point2"));
+    const double length1 = requireNumber(args, QStringLiteral("length1"));
+    const double length2 = optionalNumber(args, QStringLiteral("length2"), length1);
+    const bool trim = optionalBool(args, QStringLiteral("trim"), true);
+    if (length1 < 0.0 || length2 < 0.0 || (length1 == 0.0 && length2 == 0.0))
+        badArgs(QStringLiteral("chamfer lengths must be >= 0 and not both 0"));
+
+    const QJsonArray pair{args.value(QStringLiteral("entity1")),
+                          args.value(QStringLiteral("entity2"))};
+    if (trim)
+        isolateReplacement(pair);
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->bevel(entity1, point1, entity2, point2, length1, length2, trim))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    if (trim)
+        invalidateHandles(pair);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModCut(const QJsonObject &args)
+{
+    requireModification();
+    Plug_Entity *entity = lookupEntity(args);
+    const QPointF point = requirePoint(args, QStringLiteral("point"));
+
+    const QJsonArray replaced{args.value(QStringLiteral("handle"))};
+    isolateReplacement(replaced);
+    const QSet<const void *> before = entityKeys();
+    if (!m_native->cut(entity, point))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    invalidateHandles(replaced);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModChangeAttributes(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+
+    // Formats follow entity data (and so entity_update): color as an int,
+    // "lineweight"-style width names, linetype names. "bylayer"/"byblock"
+    // are accepted for color too.
+    NativeBridge::AttributeChange change;
+    if (args.contains(QStringLiteral("layer"))) {
+        change.changeLayer = true;
+        change.layer = requireString(args, QStringLiteral("layer"));
+        // RS_Entity::setLayer(name) quietly leaves the entity on no layer
+        // when the name is unknown.
+        if (!m_doc->getAllLayer().contains(change.layer))
+            badArgs(QStringLiteral("no layer named \"%1\"").arg(change.layer));
+    }
+    if (args.contains(QStringLiteral("color"))) {
+        change.changeColor = true;
+        change.color = colorArg(args.value(QStringLiteral("color")));
+    }
+    if (args.contains(QStringLiteral("linetype"))) {
+        change.changeLineType = true;
+        change.lineType = requireString(args, QStringLiteral("linetype"));
+        if (!NativeBridge::isLineTypeName(change.lineType))
+            badArgs(QStringLiteral("unknown linetype \"%1\"").arg(change.lineType));
+    }
+    if (args.contains(QStringLiteral("width"))) {
+        change.changeWidth = true;
+        change.width = requireString(args, QStringLiteral("width"));
+        if (!NativeBridge::isLineWidthName(change.width))
+            badArgs(QStringLiteral("unknown width \"%1\" (use e.g. \"0.25mm\", "
+                                   "\"BYLAYER\")").arg(change.width));
+    }
+    if (!change.changeLayer && !change.changeColor && !change.changeLineType
+        && !change.changeWidth) {
+        badArgs(QStringLiteral("name at least one of layer, color, linetype, "
+                               "width"));
+    }
+
+    isolateReplacement(handles);
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!m_native->changeAttributes(change))
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    // Every selected entity is replaced by a re-attributed clone.
+    invalidateHandles(handles);
+    return newEntitiesSince(before);
+}
+
+QJsonValue Dispatcher::opModRevertDirection(const QJsonObject &args)
+{
+    requireModification();
+    const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 1);
+    isolateReplacement(handles);
+    const QSet<const void *> before = entityKeys();
+    selectHandles(handles);
+    if (!m_native->revertDirection())
+        throw RequestError(QStringLiteral("failed"), m_native->lastError());
+    invalidateHandles(handles);
+    return newEntitiesSince(before);
 }
 
 } // namespace lcbridge
