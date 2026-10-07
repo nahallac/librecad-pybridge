@@ -1,16 +1,22 @@
 # LibreCAD Python bridge
 
-Scripting for LibreCAD: drive the open drawing from Python, with access to geometry, layers,
-blocks, and selection.
+Scripting for LibreCAD: drive a running LibreCAD from Python — geometry, layers, blocks,
+selection, real dimensions and hatches, the modify tools, undo, files — in the drawing the user
+has open, or in a LibreCAD you launch yourself, windowed or headless.
 
 Spun out of a house-layout project that needed scripted floorplans. `docs/findings.md` records
-what has been established about LibreCAD's plugin API, with evidence for each claim.
+what has been established about LibreCAD's plugin API and internals, with evidence for each claim.
 
-**Status: milestone 4 (Python API).** A Qt5 C++ plugin that exposes `Document_Interface` as a
-table of named JSON operations and serves them over a Unix domain socket, plus a Python client in
-two layers: a thin protocol mirror (`Bridge`) and the ergonomic API scripts are meant to use
-(`Document`, `Entity`). What remains of the original plan is the honest test — driving a real
-floorplan through it.
+**Status: in use.** A Qt5 C++ plugin exposes LibreCAD as a table of named JSON operations over a
+Unix domain socket; a stdlib-only Python client wraps it (`Document`, `Entity`). The plugin API
+(`Document_Interface`) covers geometry and layers; everything beyond it — dimensions, hatches,
+selection reads, offset/mirror/trim/explode, undo steps, save/open — comes from a *native layer*
+compiled against LibreCAD's own source, version-gated at runtime. Validated against LibreCAD
+2.2.1.5 on Arch; other agents drive real floorplan work through it.
+
+**When not to use it:** to *generate* a DXF with no one looking, write the file with `ezdxf` and
+open it in LibreCAD. The bridge is for interacting with the running application: seeing results
+as they happen, sharing a drawing with a person, undo integration, reading what someone drew.
 
 ## Build and install
 
@@ -47,24 +53,27 @@ happen silently.
 
 ## Using it
 
-Open a drawing, then **Plugins → Start Python bridge**. Plugin menu entries are disabled while no
-drawing is open. Or skip the click: with `LC_PYBRIDGE_AUTOSTART=1` in LibreCAD's environment the
-plugin starts the session itself as soon as a drawing is open, so
+Two ways to get a session:
 
-```bash
-LC_PYBRIDGE_AUTOSTART=1 librecad plate.dxf &
-```
+- **By hand:** open a drawing, then **Plugins → Start Python bridge**. Plugin menu entries are
+  disabled while no drawing is open.
+- **Unattended:** with `LC_PYBRIDGE_AUTOSTART=1` in LibreCAD's environment the plugin starts the
+  session itself as soon as a drawing is open:
 
-is a listening bridge with no one at the keyboard; add `QT_QPA_PLATFORM=offscreen` for no window
-at all. `Document.launch(drawing, headless=...)` in the Python client does exactly this and
-returns a connected `Document` (the process is on `doc.process`). A small status strip appears in the corner of the LibreCAD window; the session
-serves Python clients until you press *Stop* or a client sends `{"op": "shutdown"}`. LibreCAD
-stays usable while the session runs, and everything the session does is **one undo step**, by
-design.
+  ```bash
+  LC_PYBRIDGE_AUTOSTART=1 librecad plate.dxf &
+  ```
+
+  Add `QT_QPA_PLATFORM=offscreen` for no window at all. `Document.launch(drawing, headless=...)`
+  in the Python client does exactly this and returns a connected `Document` (the process is on
+  `doc.process`; `terminate()` it when done — `shutdown()` only ends the session).
+
+A small status strip appears in the corner of the LibreCAD window; the session serves Python
+clients until you press *Stop* or a client sends `{"op": "shutdown"}`. LibreCAD stays usable while
+the session runs. Everything the session does is **one undo step** unless the script calls
+`undo_checkpoint()` between stages.
 
 ## Driving it from Python
-
-With a session running:
 
 Install the client into your project's environment (stdlib-only, Python 3.10+):
 
@@ -101,16 +110,19 @@ so results always reflect what was queued, and an exception discards the unsent 
 objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handle, `update()` and
 `remove()` end it — further use raises `StaleEntityError`, re-fetch with `doc.entities()`.
 
-### Real dimensions and hatches
+### The native layer
 
-`cad_dim_*()` and `cad_hatch()` create **real DIMENSION and HATCH entities** — associative,
-editable with LibreCAD's own tools. The plugin API cannot make either, so the bridge drives
-LibreCAD's command line from in-process instead (and auto-fills the hatch pattern dialog). The
-plugin is compiled against LibreCAD's own source for this, so it is tied to one LibreCAD version:
-at runtime it compares the version it was built against with the one running and, on a mismatch,
-the native operations report `unavailable` instead of failing strangely (`native_status` shows
-both strings). Appearance follows the drawing's dimension variables, reachable via `set_variable`
-(`$DIMTXT`, `$DIMASZ`, ...).
+LibreCAD's plugin API stops at plain geometry. The plugin runs inside LibreCAD's process and is
+compiled against LibreCAD's source, so it can use the engine directly. Everything in this section
+needs that, and is therefore tied to one LibreCAD version: at runtime the plugin compares the
+version it was built against with the one running and, on a mismatch, these operations report
+`unavailable` instead of failing strangely (`native_status` shows both strings). The stub server
+used by the tests reports the same.
+
+**Real dimensions and hatches.** `cad_dim_*()` and `cad_hatch()` create **real DIMENSION and
+HATCH entities** — associative, editable with LibreCAD's own tools — by driving LibreCAD's command
+line from in-process (and auto-filling the hatch pattern dialog). Appearance follows the drawing's
+dimension variables, reachable via `set_variable` (`$DIMTXT`, `$DIMASZ`, ...).
 
 ```python
 doc.set_variable("$DIMTXT", 60.0)                    # dimension text height
@@ -121,15 +133,15 @@ doc.cad_hatch(boundary, pattern="ANSI31", scale=10.0)
 doc.exec_command("zoomauto")                         # raw command-line access
 ```
 
-The same access reads what the plugin API will not say: `entity.selected`, `entity.bbox()`,
-`doc.bbox()` (union over given entities or the whole drawing), and
-`doc.entities(selected_only=True)` — the current selection, straight from the engine.
+**Selection and extents.** `entity.selected`, `entity.bbox()`, `doc.bbox()` (union over given
+entities or the whole drawing), and `doc.entities(selected_only=True)` — the current selection,
+straight from the engine. The plugin API can only *prompt* for a selection.
 
-And the modify tools themselves, run through the engine class behind them (`RS_Modification`),
-not the command line: `doc.offset(entities, distance, side)`, `doc.mirror(entities, p1, p2,
-copy=False)`, `doc.explode(entities)`, and `doc.trim(entity, trim_point, limit, limit_point,
-both=False)`. Each returns the entities it created; entities the engine replaced (trimmed lines,
-exploded polylines, mirrored or offset originals when not kept) go stale like after `update()`.
+**Modify tools**, run through the engine class behind them (`RS_Modification`), not the command
+line: `doc.offset(entities, distance, side)`, `doc.mirror(entities, p1, p2, copy=False)`,
+`doc.explode(entities)`, and `doc.trim(entity, trim_point, limit, limit_point, both=False)`. Each
+returns the entities it created; entities the engine replaced (trimmed lines, exploded polylines,
+mirrored or offset originals when not kept) go stale like after `update()`.
 
 ```python
 wall = doc.entities(types=["LINE"])[0]
@@ -138,7 +150,7 @@ doc.mirror([wall, inner], (2000, 0), (2000, 1), copy=True)
 kept, = doc.trim(wall, trim_point=(10, 0), limit=inner, limit_point=(500, 0))
 ```
 
-Files and undo, through the same access:
+**Files and undo:**
 
 ```python
 doc.file_info()                         # {"path": "...", "modified": bool}
@@ -150,13 +162,16 @@ doc.open("/path/to/other.dxf")          # new window, new session, same Document
 doc.new()
 ```
 
-A session is one undo step unless you checkpoint it. `open()` and `new()` are different: a
-session is bound to one drawing (see the architecture note below), so they end the session, have
-LibreCAD open the drawing in a new window and start a fresh session on it, and reconnect. Every
-`Entity` from before is stale afterwards; the `Document` object carries over.
+A session is one undo step unless you checkpoint it; `undo()`/`redo()` work on whole steps, and
+queries in between do not discard redo history. `open()` and `new()` are different from the rest:
+a session is bound to one drawing (see the architecture note below), so they end the session,
+have LibreCAD open the drawing in a new window and start a fresh session on it, and reconnect.
+Every `Entity` from before is stale afterwards; the `Document` object carries over. If LibreCAD
+shows a dialog during the open (an unreadable file, say), the restart waits for it and the client
+times out.
 
-`python/examples/native_demo.py` draws a hatched, dimensioned plate. See `docs/findings.md`,
-"Native access", for how this works and what it depends on.
+`python/examples/native_demo.py` draws a hatched, dimensioned plate through all of this. See
+`docs/findings.md`, "Native access", for how it works and what it depends on.
 
 ### Drawn dimensions
 
@@ -213,39 +228,57 @@ Conventions, uniform across every operation:
 - `batch` takes a list of requests and returns a list of responses, so bulk geometry is one message
   instead of a round trip per entity.
 
-Run `{"op": "operations"}` for the current list. Four operations are handled by the server
-rather than the dispatcher and so are not in it: `session` (a unique id for the running session),
-`shutdown`, `file_open`, and `file_new`. The last three end the session; `file_open` and
-`file_new` also open a drawing (or a new one) and start a new session on it.
-Deliberately absent: the interactive prompts
-(`getPoint`, `getEnt`, `getSelect`, `getSelectByType`, `getInt`, `getReal`, `getString`). Each one
-spins a nested Qt event loop and cancels whatever action the user had in progress, so they need a
-design of their own — see `docs/findings.md` risks 6 and 8. One consequence is worth knowing now:
-**the plugin API cannot read the current selection**, only prompt for a new one. The native
-layer fills that gap (`entity_selected`, `get_entities` with `selected_only`, and the bounding
-box reads `entity_bbox` / `get_bbox`), where it is available.
+### Operations
+
+`{"op": "operations"}` returns the live list. Grouped, with the Python method where it differs:
+
+| Group | Operations |
+|---|---|
+| Meta | `ping`, `operations`, `batch`, `update_view`, `native_status` |
+| Create | `add_point`, `add_line`, `add_lines`, `add_polyline`, `add_spline_points` (`add_spline`), `add_circle`, `add_arc`, `add_ellipse`, `add_text`, `add_insert`, `add_block_from_file` |
+| Layers, blocks | `get_current_layer`, `set_layer`, `get_layers`, `delete_layer`, `get_layer_properties`, `set_layer_properties`, `get_blocks` |
+| Query | `get_entities` (filters: `types`, `visible_only`, `selected_only`*), `entity_data`, `entity_polyline`, `release_handles`, `get_variable`, `real_to_string` |
+| Entity edit | `entity_update`, `entity_set_polyline`, `entity_move`, `entity_rotate`, `entity_move_rotate`, `entity_scale`, `entity_remove`, `set_variable`, `unselect` |
+| Selection, extents* | `select_entities` (`select`), `entity_selected`, `entity_bbox`, `get_bbox` |
+| Command line* | `exec_command`, `cmd_dim` (`cad_dim*`), `cmd_hatch` (`cad_hatch`) |
+| Modify* | `mod_offset`, `mod_mirror`, `mod_explode`, `mod_trim` |
+| Undo* | `undo_checkpoint`, `undo`, `redo` |
+| Files* | `file_info`, `file_save`, `file_save_as` |
+| Session (server-level, not in the list) | `session`, `shutdown`, `file_open`* (`open`), `file_new`* (`new`) |
+
+\* native layer; `unavailable` on a version mismatch or the stub.
+
+Deliberately absent: the interactive prompts (`getPoint`, `getEnt`, `getSelect`,
+`getSelectByType`, `getInt`, `getReal`, `getString`). Each one spins a nested Qt event loop and
+cancels whatever action the user had in progress, so they need a design of their own — see
+`docs/findings.md` risks 6 and 8.
 
 ## Layout
 
 ```
 plugin/
-  lc_pybridge.{h,cpp}        plugin entry point and menu actions
+  lc_pybridge.{h,cpp}        plugin entry point, menu action, auto-start,
+                             session restart after file_open/file_new
   lc_bridge_dispatch.{h,cpp} the operation table over Document_Interface
-  lc_bridge_native.{h,cpp}   command line, selection, hatch dialog: compiled
-                             against LibreCAD's source tree (LIBRECAD_SRC)
+                             and the native layer
+  lc_bridge_native.{h,cpp}   the native layer: command line, selection,
+                             hatch dialog, RS_Modification, undo cycles,
+                             file save/open -- compiled against LibreCAD's
+                             source tree (LIBRECAD_SRC), version-gated
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
-  lc_bridge_server.{h,cpp}   QLocalServer transport serving the dispatcher
+  lc_bridge_server.{h,cpp}   QLocalServer transport; session-level ops
 python/
   pyproject.toml             pip packaging for the client (pip install -e python/)
   lcbridge.py                Python client, stdlib only: Bridge (protocol) +
-                             Document/Entity (ergonomic API)
+                             Document/Entity (ergonomic API), Document.launch()
   smoke_test.py              end-to-end checks of the protocol layer
   api_test.py                end-to-end checks of the ergonomic layer
   examples/room_demo.py      a furnished room drawn through the API
+  examples/native_demo.py    a hatched, dimensioned plate via the native layer
 tools/loadtest/      QPluginLoader harness, used by `make check`
-tools/dispatchtest/  stub Document_Interface + stub native layer + runner
-                     (`make test`); --serve mode serves the stub over the
-                     socket for `make test-socket`
+tools/dispatchtest/  stub Document_Interface + stub native layer
+                     (fake_native.cpp) + runner (`make test`); --serve mode
+                     serves the stub over the socket for `make test-socket`
 docs/findings.md     what has been established about the plugin API, with evidence
 vendor/              upstream LibreCAD v2.2.1.5 sources for reference, not built
 scripts/install.sh
@@ -261,20 +294,42 @@ starting LibreCAD. That is where to iterate.
 so the claims in `docs/findings.md` can be rechecked without network access. The build itself
 reads the full tree from `LIBRECAD_SRC`.
 
+## Testing
+
+`make check` runs everything that needs no LibreCAD: the dispatcher against the stub document,
+the stub served over the socket with the Python tests driving it, and a QPluginLoader load of the
+built plugin (which works outside LibreCAD because the native layer binds nothing at load time —
+see findings). The native layer itself can only be verified live. The quick way:
+
+```python
+from lcbridge import Document
+doc = Document.launch("some.dxf", headless=True)   # or headless=False to watch
+...
+doc.shutdown(); doc.process.terminate()
+```
+
+`python/examples/native_demo.py` is the live check for dimensions and hatches.
+
 ## What comes next
 
-Milestone 5: drive a real floorplan through the API — the honest test of whether it is pleasant
-to use. Candidates that may fall out of that: a `prompt_selection`
-operation (deliberately interactive, see findings risk 8), MTEXT support if LibreCAD grows it in
-the plugin interface, and block insert workflows.
+Still missing, roughly in order of value:
 
-The architecture note, for context. `docs/findings.md` risk 7 establishes that a
-plugin cannot hold a `Document_Interface*` past the end of `execComm()`: the object is
-stack-allocated by LibreCAD for the duration of the call and the concrete class is not exported.
-So the RPC server cannot live in the background and reach into the document when a request
-arrives. Instead `execComm()` has to *be* the server loop — the menu entry starts the bridge,
-serves requests while pumping Qt events, and returns when the client quits.
+- Remaining modify tools through `RS_Modification`: move/rotate/scale with copies, stretch,
+  fillet (round), chamfer (bevel), cut, bulk attribute change, revert direction.
+- Creation gaps: `add_mtext` (the plugin API has `addMText`, unwrapped), `add_image`, the other
+  dimension kinds (radial, diametric, angular, leader) through the command line.
+- Layer state (freeze, lock, hide, rename) and block definition from entities.
+- View and windows: zoom, visible area, `file_close`, listing and switching documents (every
+  `open()` leaves its window behind), export to PDF/SVG.
+- Queries: lengths, areas, intersections, nearest entity, stable entity ids across sessions.
+- The interactive prompts as explicit blocking operations, and push events (selection changed,
+  document modified) for live sync.
 
-That is still Option A, and it still keeps Python out of LibreCAD's process. It also means a whole
-scripting session is a single undo step, which falls out of risk 1, and which is the intended
-behaviour here.
+The architecture note, for context. `docs/findings.md` risk 7 establishes that a plugin cannot
+hold a `Document_Interface*` past the end of `execComm()`: the object is stack-allocated by
+LibreCAD for the duration of the call and the concrete class is not exported. So the RPC server
+cannot live in the background and reach into the document when a request arrives. Instead
+`execComm()` has to *be* the server loop — the menu entry (or the auto-start) starts the bridge,
+serves requests while pumping Qt events, and returns when the client quits. Python stays out of
+LibreCAD's process. A session is therefore bound to one drawing, which is why `open()` and
+`new()` restart the session, and why a session is one undo step until it is checkpointed.

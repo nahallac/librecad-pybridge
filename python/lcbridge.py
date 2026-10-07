@@ -1,18 +1,30 @@
-"""Thin client for the LibreCAD Python bridge.
+"""Python client for the LibreCAD Python bridge.
 
-Speaks the bridge's line protocol: one JSON object per line over a Unix domain
-socket. This module is deliberately a thin mirror of the plugin's operation
-table -- the ergonomic wrapper (doc.add_line(...), doc.layers, ...) is a later
-milestone and will sit on top of this.
+Two layers over the bridge's line protocol (one JSON object per line over a
+Unix domain socket):
+
+  - Bridge: a thin mirror of the plugin's operation table, request()/batch().
+  - Document / Entity: the API scripts are meant to use. Geometry, layers,
+    blocks, queries, and -- through the plugin's native layer -- real
+    dimensions and hatches, selection and bounding-box reads, offset/mirror/
+    explode/trim, undo steps, save/open/new. Document.launch() starts a
+    LibreCAD of its own, windowed or headless, with the session auto-started.
 
 Usage:
 
-    from lcbridge import Bridge
+    from lcbridge import Document
 
-    with Bridge() as b:
-        b.request("set_layer", name="FLOORPLAN")
-        b.request("add_line", start=[0, 0], end=[5000, 0])
-        print(b.request("get_layers"))
+    with Document.connect() as doc:          # a session someone started
+        doc.set_layer("FLOORPLAN")
+        doc.add_line((0, 0), (5000, 0))
+        print(doc.layers())
+
+    doc = Document.launch("plan.dxf", headless=True)   # or start your own
+    ...
+    doc.shutdown(); doc.process.terminate()
+
+Native operations raise BridgeError("unavailable") against the offline stub
+or a LibreCAD the plugin was not built for; doc.native_status() says which.
 
 Conventions (enforced by the plugin, documented here for convenience):
   - points are [x, y]; polyline vertices are [x, y] or [x, y, bulge]
@@ -28,7 +40,7 @@ XDG_RUNTIME_DIR.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import json
 import os
