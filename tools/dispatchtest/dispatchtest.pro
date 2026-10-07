@@ -1,5 +1,8 @@
 # Offline check for the dispatch layer: links the dispatcher and its self-test
 # against a stub Document_Interface, so `make test` needs no LibreCAD process.
+# The real native layer is replaced by fake_native.cpp: lc_bridge_native.cpp
+# is compiled against LibreCAD's source tree, and the stub reports every
+# native operation as unavailable, which is what the self-test asserts.
 QT += core network widgets
 CONFIG += console c++17
 CONFIG -= app_bundle
@@ -15,8 +18,8 @@ OBJECTS_DIR = $$OUT_PWD/.obj
 SOURCES += \
     main.cpp \
     fake_document.cpp \
+    fake_native.cpp \
     $$PWD/../../plugin/lc_bridge_dispatch.cpp \
-    $$PWD/../../plugin/lc_bridge_native.cpp \
     $$PWD/../../plugin/lc_bridge_selftest.cpp \
     $$PWD/../../plugin/lc_bridge_server.cpp
 

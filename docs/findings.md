@@ -49,12 +49,29 @@ Two facts make more than the plugin API reachable:
    actions, and coordinate lines (`"10,20"`) answer their point prompts synchronously
    (`RS_EventHandler::commandEvent` parses them with `RS_Math::eval`, so C-locale decimals work).
    Commands exist for everything, `dimaligned` through `hatch` (`librecad/src/cmd/rs_commands.cpp`).
-2. **The executable exports its symbols.** LibreCAD is linked with `--export-dynamic` (11k+
-   dynamic FUNC symbols), so a plugin can `dlsym(RTLD_DEFAULT, ...)` internal engine functions.
-   The bridge resolves `RS_Entity::setSelected(bool)` and the `RS_EntityContainer` override,
-   because hatching consumes the current selection and the plugin API has no selection setter.
-   The `RS_Entity*` itself is read out of `Plugin_Entity` by layout (first member after the
-   vtable pointer, per the vendored `doc_plugin_interface.h`).
+2. **LibreCAD is open source, and its source is on the machine.** On Arch, `librecad-debug`
+   installs the exact sources of the installed binary (558 headers, 757 `.cpp`, and the
+   uic-generated `ui_*.h`) at `/usr/src/debug/librecad/LibreCAD`. The native layer is compiled
+   against them, so it uses LibreCAD's classes as the C++ types they are: `Plugin_Entity::getEnt()`
+   gives the `RS_Entity*` behind a `Plug_Entity`, `RS_Entity::setSelected()` is a virtual call
+   (the `RS_EntityContainer` override is picked by the vtable), `QG_CommandWidget::handleCommand()`
+   is called directly, and `QG_DlgHatch`'s `Ui` members are filled by name at compile time.
+   Hatching consumes the current selection and the plugin API has no selection setter, which is
+   why selection is needed at all.
+
+   Two consequences. First, everything so far binds through vtables and inline accessors, so the
+   plugin has **no undefined LibreCAD symbols** and still loads outside LibreCAD (`make check`
+   relies on that). The executable *is* linked `--export-dynamic` (11k+ dynamic FUNC symbols:
+   `RS_Modification::offset/mirror/trim/explode`, `RS_Document::startUndoCycle/endUndoCycle`,
+   `QC_ApplicationWindow::slotFileOpen(QString)`, ...), so non-virtual engine calls are available
+   the same way when needed; each one adds a symbol that must resolve when LibreCAD loads the
+   plugin. Second, layouts and vtables are only known to match the version compiled against, so
+   `NativeBridge` compares `QCoreApplication::applicationVersion()` (set from `LC_VERSION`,
+   `"v2.2.1.5"` for 2.2.1.5) with the build-time `LIBRECAD_VERSION` before touching anything;
+   `native_status` reports both as `built_against` and `running`.
+
+   Earlier the same three hooks were reached by `dlsym` on mangled names and by reading the
+   `Plugin_Entity` layout by hand; the headers replace that guesswork.
 
 On top of those, `lc_bridge_native.cpp` implements:
 
@@ -74,12 +91,13 @@ DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session
 objectName is `"Command"` (set by `lc_widgetfactory.cpp`), not the `.ui` default, so it is
 located by class name.
 
-Fragility is the price: widget class and object names, command spellings, mangled symbol names,
-and the `Plugin_Entity` layout are all LibreCAD internals with no compatibility promise. Everything
-fails soft — a missing widget or symbol turns the operations into `"unavailable"` errors (which
-is also how they behave against the offline stub, whose tests assert exactly that). Undo still
-collapses to one step per session: the injected actions' undo cycles nest inside `execPlug()`'s
-outer `LC_UndoSection` like everything else.
+Fragility is the price: class layouts, vtables, widget class names, and command spellings are
+all LibreCAD internals with no compatibility promise. Everything fails soft — a version mismatch
+or a missing widget turns the operations into `"unavailable"` errors (which is also how they
+behave against the offline stub, whose tests assert exactly that). A LibreCAD update therefore
+means: install its sources, rebuild, and if `applicationVersion()` changed, pass the new
+`LIBRECAD_VERSION`. Undo still collapses to one step per session: the injected actions' undo
+cycles nest inside `execPlug()`'s outer `LC_UndoSection` like everything else.
 
 Dimension appearance follows the drawing's dimension variables (`$DIMTXT`, `$DIMASZ`, `$DIMEXO`,
 `$DIMEXE`, ...), which `addVariable()` can set through the ordinary `set_variable` operation.

@@ -2,23 +2,29 @@
 /*  lc_bridge_native.h - in-process access to LibreCAD beyond the plugin API */
 /*                                                                           */
 /*  The plugin interface cannot create DIMENSION or HATCH entities, but the   */
-/*  plugin runs inside LibreCAD's process, and LibreCAD both ships a command  */
-/*  line and exports its internal symbols (--export-dynamic). This class      */
-/*  reaches both:                                                            */
+/*  plugin runs inside LibreCAD's process, and LibreCAD is open source. This  */
+/*  class is compiled against LibreCAD's own headers (engine, main, ui) and   */
+/*  talks to its objects as the C++ types they are:                          */
 /*                                                                           */
-/*   - execCommand() feeds a line to the command widget exactly as if typed,  */
-/*     via the public slot QG_CommandWidget::handleCommand(QString). That     */
-/*     runs real LibreCAD actions, which is how real dimensions get drawn.    */
-/*   - setSelected() flips an entity's selection flag by resolving            */
-/*     RS_Entity::setSelected from the executable with dlsym(). Hatching      */
-/*     consumes the current selection, and the plugin API has no setter.      */
-/*   - armHatchDialog() watches for the modal hatch dialog that the hatch     */
-/*     action opens, fills in pattern/scale/angle/solid, and accepts it.      */
+/*   - execCommand() feeds a line to QG_CommandWidget::handleCommand(),      */
+/*     exactly as if typed. That runs real LibreCAD actions, which is how     */
+/*     real dimensions get drawn.                                            */
+/*   - setSelected() reaches the RS_Entity behind a Plug_Entity through       */
+/*     Plugin_Entity::getEnt() and calls RS_Entity::setSelected(); the        */
+/*     virtual call picks the RS_EntityContainer override by itself.         */
+/*     Hatching consumes the current selection, and the plugin API has no     */
+/*     selection setter.                                                     */
+/*   - armHatchDialog() watches for the modal QG_DlgHatch that the hatch      */
+/*     action opens, fills in pattern/scale/angle/solid through its Ui        */
+/*     members, and accepts it.                                              */
 /*                                                                           */
-/*  All of this is deliberate coupling to LibreCAD internals that the plugin  */
-/*  API does not promise. Everything here fails soft: when a widget or        */
-/*  symbol is missing, the operation reports "unavailable" instead of         */
-/*  crashing. Validated against LibreCAD 2.2.1.5; see docs/findings.md.      */
+/*  This couples to LibreCAD's class layouts and vtables, which no release    */
+/*  promises to keep. Everything binds through object vtables, not exported   */
+/*  symbols, so the plugin still loads outside LibreCAD (make check); the     */
+/*  constructor refuses to touch anything unless the running LibreCAD        */
+/*  reports the version this plugin was built against, and then every        */
+/*  operation reports "unavailable" instead of crashing. See                 */
+/*  docs/findings.md, "Native access".                                       */
 /*                                                                           */
 /*  Licensed under the GNU General Public License, version 2 or later.       */
 /*****************************************************************************/
@@ -30,6 +36,7 @@
 #include <QString>
 
 class Plug_Entity;
+class QG_CommandWidget;
 class QTimer;
 class QWidget;
 
@@ -45,11 +52,18 @@ public:
     explicit NativeBridge(QWidget *mainWindow, QObject *parent = nullptr);
     ~NativeBridge() override;
 
-    //! False when the command widget or the needed symbols cannot be found;
-    //! reason() then says which.
+    //! False when the running LibreCAD is not the version this plugin was
+    //! built against, or the command widget cannot be found; reason() then
+    //! says which.
     bool commandsAvailable() const;
     bool selectionAvailable() const;
     QString reason() const { return m_reason; }
+
+    //! The LibreCAD version string the plugin was compiled against, as
+    //! QCoreApplication::applicationVersion() reports it (e.g. "v2.2.1.5").
+    static QString builtAgainst();
+    //! What the running process reports, for native_status.
+    static QString running();
 
     //! Feed one line to the command widget, as if the user typed it and
     //! pressed enter. Coordinates ("10.5,20") drive the pending action's
@@ -57,11 +71,7 @@ public:
     bool execCommand(const QString &command);
 
     //! Select or deselect the entity behind a Plug_Entity wrapper.
-    //! \a dpiType decides between RS_Entity::setSelected and the container
-    //! override, which also selects the children -- calling the base version
-    //! on a container would leave its members unselected, and the hatch
-    //! action resolves selection on the members.
-    bool setSelected(Plug_Entity *entity, int dpiType, bool selected);
+    bool setSelected(Plug_Entity *entity, bool selected);
 
     //! Start watching for the hatch dialog. When it appears, fill it in and
     //! accept it. armed() stays true until the dialog was handled or
@@ -75,14 +85,9 @@ public:
 private:
     void pollForHatchDialog();
 
-    QWidget *m_commandWidget {nullptr};
+    bool m_versionOk {false};
+    QG_CommandWidget *m_commandWidget {nullptr};
     QString m_reason;
-
-    // void(RS_Entity::*)(bool) and the RS_EntityContainer override, called
-    // through plain function pointers with an explicit this argument.
-    using SetSelectedFn = void (*)(void *, bool);
-    SetSelectedFn m_setSelectedEntity {nullptr};
-    SetSelectedFn m_setSelectedContainer {nullptr};
 
     QTimer *m_hatchTimer {nullptr};
     QString m_hatchPattern;

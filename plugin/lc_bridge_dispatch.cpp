@@ -1243,7 +1243,7 @@ int Dispatcher::selectAll(bool selected)
 
     int touched = 0;
     for (Plug_Entity *entity : entities) {
-        if (m_native->setSelected(entity, readEntityType(entity), selected))
+        if (m_native->setSelected(entity, selected))
             ++touched;
     }
     qDeleteAll(entities);
@@ -1260,6 +1260,10 @@ QJsonValue Dispatcher::opNativeStatus(const QJsonObject &args)
                   m_native && m_native->selectionAvailable());
     result.insert(QStringLiteral("reason"),
                   m_native ? m_native->reason() : QStringLiteral("no native bridge"));
+    if (m_native) {
+        result.insert(QStringLiteral("built_against"), NativeBridge::builtAgainst());
+        result.insert(QStringLiteral("running"), NativeBridge::running());
+    }
     return result;
 }
 
@@ -1289,7 +1293,7 @@ QJsonValue Dispatcher::opSelectEntities(const QJsonObject &args)
         QJsonObject lookup;
         lookup.insert(QStringLiteral("handle"), handles.at(i));
         Plug_Entity *entity = lookupEntity(lookup);
-        if (m_native->setSelected(entity, readEntityType(entity), true))
+        if (m_native->setSelected(entity, true))
             ++selected;
     }
     return selected;

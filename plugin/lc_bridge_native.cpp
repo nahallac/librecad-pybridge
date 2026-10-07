@@ -1,106 +1,111 @@
 /*****************************************************************************/
 /*  lc_bridge_native.cpp - in-process access to LibreCAD internals           */
 /*                                                                           */
+/*  Compiled against LibreCAD's own headers (see LIBRECAD_SRC in the .pro).   */
+/*  Every call below goes through a vtable or an inline accessor, so the     */
+/*  shared object carries no undefined LibreCAD symbols and still loads       */
+/*  outside LibreCAD; what it does depend on is the class layouts of the      */
+/*  version it was built against, which the constructor checks first.        */
+/*                                                                           */
 /*  Licensed under the GNU General Public License, version 2 or later.       */
 /*****************************************************************************/
 
 #include "lc_bridge_native.h"
 
+// LibreCAD plugin interface (installed headers).
 #include "document_interface.h"
+// LibreCAD internals (source tree).
+#include "doc_plugin_interface.h"   // Plugin_Entity
+#include "rs_entity.h"              // RS_Entity::setSelected
+#include "qg_commandwidget.h"       // QG_CommandWidget::handleCommand
+#include "qg_dlghatch.h"            // QG_DlgHatch and its Ui members
 
 #include <QApplication>
 #include <QCheckBox>
-#include <QComboBox>
-#include <QDialog>
+#include <QCoreApplication>
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QTimer>
 #include <QWidget>
 
-#include <dlfcn.h>
+#ifndef LC_PYBRIDGE_LIBRECAD_VERSION
+#error "LC_PYBRIDGE_LIBRECAD_VERSION must be defined (lc_pybridge.pro sets it)"
+#endif
 
 namespace lcbridge {
 namespace {
 
-// Mangled names of the selection setters LibreCAD exports (it is linked with
-// --export-dynamic, so the executable's symbols resolve from a plugin).
-const char *const kSetSelectedEntity = "_ZN9RS_Entity11setSelectedEb";
-const char *const kSetSelectedContainer = "_ZN18RS_EntityContainer11setSelectedEb";
-
 //! The RS_Entity* behind a Plug_Entity wrapper.
 //!
-//! LibreCAD's Plugin_Entity (librecad/src/main/doc_plugin_interface.h) is the
-//! object a Plug_Entity actually points at, and its first data member after
-//! the vtable pointer is `RS_Entity* entity`. There is no accessor reachable
-//! through the plugin interface (getEnt() is non-virtual and inline), so the
-//! pointer is read by layout. The layout is pinned by the vendored copy of
-//! that header (vendor/librecad-v2.2.1.5/doc_plugin_interface.h) and would
-//! need rechecking on a LibreCAD update, like every other internal detail
-//! this file touches.
-void *underlyingEntity(Plug_Entity *entity)
+//! The object LibreCAD hands out as a Plug_Entity* is really a Plugin_Entity
+//! (librecad/src/main/doc_plugin_interface.h): the two classes are unrelated
+//! by inheritance and LibreCAD itself bridges them with reinterpret_cast, so
+//! the same cast is the correct way back. getEnt() is an inline accessor,
+//! which makes this a compile-time layout dependency on the header and
+//! nothing more.
+RS_Entity *underlyingEntity(Plug_Entity *entity)
 {
     if (!entity)
         return nullptr;
-    return *reinterpret_cast<void **>(
-        reinterpret_cast<char *>(entity) + sizeof(void *));
+    return reinterpret_cast<Plugin_Entity *>(entity)->getEnt();
 }
 
-//! Entity types whose engine class derives from RS_EntityContainer, per the
-//! DPI::ETYPE enum comment ("SOLID /*end atomicEntity, start entityContainer*/").
-bool isContainerType(int dpiType)
+//! True when \a object is an instance of the LibreCAD class named
+//! \a className, by meta-object name rather than qobject_cast: a cast would
+//! reference the class's staticMetaObject, a data symbol the dynamic loader
+//! must resolve at load time, and that would stop the plugin loading
+//! anywhere but inside LibreCAD.
+bool isInstanceOf(const QObject *object, const char *className)
 {
-    switch (dpiType) {
-    case DPI::MTEXT:
-    case DPI::TEXT:
-    case DPI::INSERT:
-    case DPI::POLYLINE:
-    case DPI::SPLINE:
-    case DPI::SPLINEPOINTS:
-    case DPI::HATCH:
-    case DPI::DIMLEADER:
-    case DPI::DIMALIGNED:
-    case DPI::DIMLINEAR:
-    case DPI::DIMRADIAL:
-    case DPI::DIMDIAMETRIC:
-    case DPI::DIMANGULAR:
-        return true;
-    default:
-        return false;
+    for (const QMetaObject *meta = object->metaObject(); meta;
+         meta = meta->superClass()) {
+        if (qstrcmp(meta->className(), className) == 0)
+            return true;
     }
+    return false;
 }
 
 } // namespace
 
+QString NativeBridge::builtAgainst()
+{
+    return QStringLiteral(LC_PYBRIDGE_LIBRECAD_VERSION);
+}
+
+QString NativeBridge::running()
+{
+    return QCoreApplication::applicationVersion();
+}
+
 NativeBridge::NativeBridge(QWidget *mainWindow, QObject *parent)
     : QObject(parent)
 {
-    // The command widget's handleCommand(QString) is a public slot, so it is
-    // reachable with nothing but QObject machinery. It is found by class name:
-    // its objectName is "Command" (lc_widgetfactory.cpp passes that to the
-    // constructor, which pre-empts the .ui file's default), and a class-name
-    // scan survives both spellings.
+    // Layouts and vtables are only known to match the LibreCAD whose headers
+    // this was compiled against, so nothing below runs unless the process
+    // says it is that version (main.cpp sets applicationVersion from
+    // LC_VERSION).
+    m_versionOk = running() == builtAgainst();
+    if (!m_versionOk) {
+        m_reason = QStringLiteral("plugin built against LibreCAD %1, "
+                                  "running %2")
+                       .arg(builtAgainst(), running());
+        return;
+    }
+
+    // The command widget is found by class, not object name: its objectName
+    // is "Command" (lc_widgetfactory.cpp passes that to the constructor,
+    // which pre-empts the .ui file's default).
     if (mainWindow) {
         const QList<QWidget *> children = mainWindow->findChildren<QWidget *>();
         for (QWidget *child : children) {
-            if (qstrcmp(child->metaObject()->className(), "QG_CommandWidget") == 0) {
-                m_commandWidget = child;
+            if (isInstanceOf(child, "QG_CommandWidget")) {
+                m_commandWidget = static_cast<QG_CommandWidget *>(child);
                 break;
             }
         }
     }
     if (!m_commandWidget)
         m_reason = QStringLiteral("command widget not found in the main window");
-
-    m_setSelectedEntity = reinterpret_cast<SetSelectedFn>(
-        dlsym(RTLD_DEFAULT, kSetSelectedEntity));
-    m_setSelectedContainer = reinterpret_cast<SetSelectedFn>(
-        dlsym(RTLD_DEFAULT, kSetSelectedContainer));
-    if (!m_setSelectedEntity || !m_setSelectedContainer) {
-        if (!m_reason.isEmpty())
-            m_reason += QStringLiteral("; ");
-        m_reason += QStringLiteral("selection symbols not exported by this "
-                                   "LibreCAD build");
-    }
 
     m_hatchTimer = new QTimer(this);
     m_hatchTimer->setInterval(25);
@@ -112,37 +117,36 @@ NativeBridge::~NativeBridge() = default;
 
 bool NativeBridge::commandsAvailable() const
 {
-    return m_commandWidget != nullptr;
+    return m_versionOk && m_commandWidget != nullptr;
 }
 
 bool NativeBridge::selectionAvailable() const
 {
-    return m_setSelectedEntity && m_setSelectedContainer;
+    // Selection needs only the entity vtable, which the version check covers.
+    return m_versionOk;
 }
 
 bool NativeBridge::execCommand(const QString &command)
 {
-    if (!m_commandWidget)
+    if (!commandsAvailable())
         return false;
-    // Direct connection: the command, and any action it starts or feeds, runs
-    // to completion before this returns, exactly like a typed command.
-    return QMetaObject::invokeMethod(m_commandWidget, "handleCommand",
-                                     Qt::DirectConnection,
-                                     Q_ARG(QString, command));
+    // Synchronous, like a typed command: the command, and any action it
+    // starts or feeds, runs to completion before this returns.
+    m_commandWidget->handleCommand(command);
+    return true;
 }
 
-bool NativeBridge::setSelected(Plug_Entity *entity, int dpiType, bool selected)
+bool NativeBridge::setSelected(Plug_Entity *entity, bool selected)
 {
     if (!selectionAvailable())
         return false;
-    void *rsEntity = underlyingEntity(entity);
+    RS_Entity *rsEntity = underlyingEntity(entity);
     if (!rsEntity)
         return false;
-
-    if (isContainerType(dpiType))
-        m_setSelectedContainer(rsEntity, selected);
-    else
-        m_setSelectedEntity(rsEntity, selected);
+    // Virtual: a container (polyline, insert, hatch, ...) gets the
+    // RS_EntityContainer override, which also selects its members -- the
+    // hatch action resolves selection on the members.
+    rsEntity->setSelected(selected);
     return true;
 }
 
@@ -154,13 +158,16 @@ void NativeBridge::armHatchDialog(const QString &pattern, double scaleFactor,
     m_hatchAngleDegrees = angleDegrees;
     m_hatchSolid = solid;
     m_hatchDialogHandled = false;
+    if (!m_hatchTimer)
+        return;
     m_hatchPollsLeft = qMax(1, timeoutMs / qMax(1, m_hatchTimer->interval()));
     m_hatchTimer->start();
 }
 
 void NativeBridge::disarmHatchDialog()
 {
-    m_hatchTimer->stop();
+    if (m_hatchTimer)
+        m_hatchTimer->stop();
 }
 
 void NativeBridge::pollForHatchDialog()
@@ -175,25 +182,16 @@ void NativeBridge::pollForHatchDialog()
     }
 
     for (QWidget *top : QApplication::topLevelWidgets()) {
-        auto *dialog = qobject_cast<QDialog *>(top);
-        if (!dialog || dialog->objectName() != QLatin1String("QG_DlgHatch")
-            || !dialog->isVisible()) {
+        if (!top->isVisible() || !isInstanceOf(top, "QG_DlgHatch"))
             continue;
-        }
+        auto *dialog = static_cast<QG_DlgHatch *>(top);
 
-        if (auto *solid = dialog->findChild<QCheckBox *>(QStringLiteral("cbSolid")))
-            solid->setChecked(m_hatchSolid);
-        if (auto *patternBox =
-                dialog->findChild<QComboBox *>(QStringLiteral("cbPattern"))) {
-            const int index = patternBox->findText(m_hatchPattern,
-                                                   Qt::MatchFixedString);
-            if (index >= 0)
-                patternBox->setCurrentIndex(index);
-        }
-        if (auto *scale = dialog->findChild<QLineEdit *>(QStringLiteral("leScale")))
-            scale->setText(QString::number(m_hatchScale));
-        if (auto *angle = dialog->findChild<QLineEdit *>(QStringLiteral("leAngle")))
-            angle->setText(QString::number(m_hatchAngleDegrees));
+        dialog->cbSolid->setChecked(m_hatchSolid);
+        // setPattern() adds a name the pattern list does not know, selects
+        // it in cbPattern, and refreshes the dialog's own RS_Pattern.
+        dialog->setPattern(m_hatchPattern);
+        dialog->leScale->setText(QString::number(m_hatchScale));
+        dialog->leAngle->setText(QString::number(m_hatchAngleDegrees));
 
         m_hatchDialogHandled = true;
         m_hatchTimer->stop();

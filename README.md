@@ -14,8 +14,13 @@ floorplan through it.
 
 ## Build and install
 
-No packages beyond `librecad` and `qt5-base` are required. In particular `qt5-tools` is **not**
-needed, despite what the handoff said.
+Required: `librecad`, `qt5-base`, and the **LibreCAD source tree of the installed binary**. The
+native layer (real dimensions and hatches, see below) is compiled against LibreCAD's own headers.
+On Arch, `librecad-debug` installs exactly that at `/usr/src/debug/librecad/LibreCAD`, which is the
+default; elsewhere pass `LIBRECAD_SRC=<built checkout>` to qmake (it must be a built tree, the
+generated `ui_*.h` files are needed) and `LIBRECAD_VERSION=<string>` if the binary reports
+something other than `v2.2.1.5` (`native_status` shows what it reports). `qt5-tools` is **not**
+needed.
 
 ```bash
 ./scripts/install.sh
@@ -91,10 +96,12 @@ objects follow LibreCAD's lifetime rules: `move`/`rotate`/`scale` keep the handl
 
 `cad_dim_*()` and `cad_hatch()` create **real DIMENSION and HATCH entities** — associative,
 editable with LibreCAD's own tools. The plugin API cannot make either, so the bridge drives
-LibreCAD's command line from in-process instead (and auto-fills the hatch pattern dialog). This
-couples to LibreCAD internals; against a LibreCAD where the hooks are missing the operations
-report `unavailable` instead of failing strangely. Appearance follows the drawing's dimension
-variables, reachable via `set_variable` (`$DIMTXT`, `$DIMASZ`, ...).
+LibreCAD's command line from in-process instead (and auto-fills the hatch pattern dialog). The
+plugin is compiled against LibreCAD's own source for this, so it is tied to one LibreCAD version:
+at runtime it compares the version it was built against with the one running and, on a mismatch,
+the native operations report `unavailable` instead of failing strangely (`native_status` shows
+both strings). Appearance follows the drawing's dimension variables, reachable via `set_variable`
+(`$DIMTXT`, `$DIMASZ`, ...).
 
 ```python
 doc.set_variable("$DIMTXT", 60.0)                    # dimension text height
@@ -175,6 +182,8 @@ design of their own — see `docs/findings.md` risks 6 and 8. One consequence is
 plugin/
   lc_pybridge.{h,cpp}        plugin entry point and menu actions
   lc_bridge_dispatch.{h,cpp} the operation table over Document_Interface
+  lc_bridge_native.{h,cpp}   command line, selection, hatch dialog: compiled
+                             against LibreCAD's source tree (LIBRECAD_SRC)
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
   lc_bridge_server.{h,cpp}   QLocalServer transport serving the dispatcher
 python/
@@ -185,8 +194,9 @@ python/
   api_test.py                end-to-end checks of the ergonomic layer
   examples/room_demo.py      a furnished room drawn through the API
 tools/loadtest/      QPluginLoader harness, used by `make check`
-tools/dispatchtest/  stub Document_Interface + runner (`make test`); --serve mode
-                     serves the stub over the socket for `make test-socket`
+tools/dispatchtest/  stub Document_Interface + stub native layer + runner
+                     (`make test`); --serve mode serves the stub over the
+                     socket for `make test-socket`
 docs/findings.md     what has been established about the plugin API, with evidence
 vendor/              upstream LibreCAD v2.2.1.5 sources for reference, not built
 scripts/install.sh
@@ -199,7 +209,8 @@ starting LibreCAD. That is where to iterate.
 
 `vendor/librecad-v2.2.1.5/` holds the upstream files the findings are drawn from
 (`doc_plugin_interface.{h,cpp}`, `sample.cpp`). They are reference copies — nothing builds them —
-so the claims in `docs/findings.md` can be rechecked without network access.
+so the claims in `docs/findings.md` can be rechecked without network access. The build itself
+reads the full tree from `LIBRECAD_SRC`.
 
 ## What comes next
 
