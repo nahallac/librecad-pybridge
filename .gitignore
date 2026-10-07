@@ -7,3 +7,4 @@ Makefile.lc_pybridge
 *.egg-info/
 python/dist/
 __pycache__/
+testhome/

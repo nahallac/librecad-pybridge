@@ -125,6 +125,61 @@ On top of those, `lc_bridge_native.cpp` implements:
   window exists, so its constructor polls every 100 ms until `hasActiveDocument()` (app window
   with a document) and then triggers the same `QAction`. The session-ended `QMessageBox` becomes
   a status-bar message in that mode: nothing would dismiss a modal box in an unattended run.
+- The rest of `RS_Modification` (2026-10-06): `mod_move`, `mod_rotate`, `mod_scale`,
+  `mod_move_rotate`, `mod_rotate2`, `mod_stretch`, `mod_round`, `mod_bevel`, `mod_cut`,
+  `mod_change_attributes`, `mod_revert_direction`, all bound by exported symbol like the first
+  four (plus `RS_Color::fromIntColor`, `RS_Flags` ctor/accessors, `RS_Entity::isInWindow`/
+  `isLocked`, `RS_EntityContainer::begin/end`). Things that were not obvious from the headers:
+  - `number` in the transform data is the copy count: 0 replaces the originals with
+    transformed clones, n >= 1 keeps them and adds n copies at 1x..nx. 2.2.1.5's
+    `RS_RotateData` has one angle (later versions add a second); `RS_MoveRotateData` calls its
+    centre `referencePoint`, and the rotation is about that point *after* the move. `move()`
+    leaves the new entities selected ("since 2.0.4.0: keep selection"); the others do not.
+  - `stretch()` selects every entity it clones and then calls `deselectOriginals(true)`, which
+    removes **everything selected** — a leftover selection outside the window would be deleted.
+    The bridge clears the selection first. It picks entities by window (visible, unlocked,
+    inside or with an endpoint inside), so the handles it killed are found afterwards as the
+    ones whose entity turned undone.
+  - `round()`'s first argument is not decoration: it builds the two offset helpers toward that
+    point, so it decides on which side of both entities the arc goes. The GUI passes its second
+    click; the bridge defaults to the midpoint of the two picks (inside the corner for picks on
+    the kept parts) and takes an explicit `corner`.
+  - `cut()` trusts that the point is on the entity (the action only fires on a snapped point)
+    and would otherwise trim to an off-entity point; the bridge projects with
+    `getNearestPointOnEntity()` first. A circle becomes one full-turn arc, not two pieces.
+  - `changeAttributes()` clones every selected entity. `RS_Entity::setLayer(name)` quietly
+    leaves an entity on no layer when the name is unknown, so the bridge checks the layer list.
+    The plugin API's name tables (`convLTW Converter`) are a global object, i.e. a data symbol,
+    so the line type and width tables are repeated in the plugin. `RS_Pen`/`RS_Color` are
+    inline apart from `RS_Flags`' out-of-line constructor; their vtables (virtual destructor
+    only) are emitted weak into the plugin, so no undefined data symbol results.
+  - **Undo ghost.** `RS_UndoCycle` keeps its undoables in a `std::set`. An entity created and
+    then replaced (marked undone) within one undo cycle is therefore listed once, and undo
+    toggles it back to life: draw a line, fillet it in the same session step, undo, and the
+    untrimmed line reappears next to the restored originals. LibreCAD never meets this because
+    every GUI action is its own cycle. The modify ops now call
+    `NativeBridge::isolateReplacement()` (or `isolateStretch()`) first: the native layer
+    snapshots the entities present when each cycle opens, and if an entity about to be replaced
+    is not in that snapshot it closes the cycle and opens a new one, so the operation becomes
+    its own undo step. The session stays one step whenever that is safe. Applied to the four
+    earlier modify ops too. The plugin-API edits (`entity_update`, `entity_remove`,
+    `entity_move` & co., which go through `Doc_plugin_interface::addToUndo/removeEntity`) have
+    the same ghost — verified live: `add_line`, `update(end_x=...)`, `undo()` leaves the
+    original line — and are not changed yet.
+  - Headless live tests with a fresh `HOME` hang at LibreCAD's first-start dialog (units and
+    language, modal); seed `$HOME/.config/LibreCAD/LibreCAD.conf` with `[Startup]` /
+    `FirstLoad=0`.
+
+  Verified live 2026-10-06 against 2.2.1.5, headless, numerically: moved/rotated/scaled/
+  move-rotated/rotate2 copies and in-place results against hand-computed geometry (non-uniform
+  scale turns a circle into an ELLIPSE with ratio 0.5), stretch of an endpoint in the window
+  with a selected outside entity surviving, fillet of two perpendicular lines (ARC r=2 centred
+  at (2,2), lines trimmed to the tangent points; `trim=False` adds only the arc), chamfer
+  (LINE (2,0)-(0,3) plus trimmed lines), cut of a line (two LINEs meeting at the projected
+  point) and of a circle (one ARC; cutting at an endpoint is refused), change_attributes
+  (layer/color/width/linetype round-trip through entity data, bad names rejected), revert
+  direction, and `undo()` restoring the entity count after each, including the
+  created-and-replaced-in-one-step cases.
 
 **Verified live 2026-10-05** against LibreCAD 2.2.1.5: `cmd_dim` produced DIMALIGNED and
 DIMLINEAR entities and `cmd_hatch` a HATCH, through a real bridge session

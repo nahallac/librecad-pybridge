@@ -56,4 +56,21 @@ void NativeBridge::armHatchDialog(const QString &, double, double, bool, int) {}
 void NativeBridge::disarmHatchDialog() {}
 void NativeBridge::pollForHatchDialog() {}
 
+// Modify tools: the rest of RS_Modification.
+bool NativeBridge::move(const QPointF &, int, bool, bool) { return false; }
+bool NativeBridge::rotate(const QPointF &, double, int, bool, bool) { return false; }
+bool NativeBridge::scale(const QPointF &, const QPointF &, int, bool, bool) { return false; }
+bool NativeBridge::moveRotate(const QPointF &, const QPointF &, double, int, bool, bool) { return false; }
+bool NativeBridge::rotate2(const QPointF &, const QPointF &, double, double, int, bool, bool) { return false; }
+bool NativeBridge::stretch(const QPointF &, const QPointF &, const QPointF &) { return false; }
+bool NativeBridge::round(Plug_Entity *, const QPointF &, Plug_Entity *, const QPointF &, const QPointF &, double, bool) { return false; }
+bool NativeBridge::bevel(Plug_Entity *, const QPointF &, Plug_Entity *, const QPointF &, double, double, bool) { return false; }
+bool NativeBridge::cut(Plug_Entity *, const QPointF &) { return false; }
+bool NativeBridge::isLineTypeName(const QString &) { return true; }
+bool NativeBridge::isLineWidthName(const QString &) { return true; }
+bool NativeBridge::changeAttributes(const AttributeChange &) { return false; }
+bool NativeBridge::revertDirection() { return false; }
+void NativeBridge::isolateReplacement(const QList<Plug_Entity *> &) {}
+void NativeBridge::isolateStretch(const QPointF &, const QPointF &) {}
+
 } // namespace lcbridge

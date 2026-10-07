@@ -167,6 +167,18 @@ private:
     QJsonValue opRedo(const QJsonObject &args);
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
+    // Modify tools: the rest of RS_Modification.
+    QJsonValue opModMove(const QJsonObject &args);
+    QJsonValue opModRotate(const QJsonObject &args);
+    QJsonValue opModScale(const QJsonObject &args);
+    QJsonValue opModMoveRotate(const QJsonObject &args);
+    QJsonValue opModRotate2(const QJsonObject &args);
+    QJsonValue opModStretch(const QJsonObject &args);
+    QJsonValue opModRound(const QJsonObject &args);
+    QJsonValue opModBevel(const QJsonObject &args);
+    QJsonValue opModCut(const QJsonObject &args);
+    QJsonValue opModChangeAttributes(const QJsonObject &args);
+    QJsonValue opModRevertDirection(const QJsonObject &args);
 
     //! Entities of \a dpiType currently in the drawing.
     int countEntitiesOfType(int dpiType);
@@ -191,6 +203,19 @@ private:
     QJsonArray newEntitiesSince(const QSet<const void *> &before);
     //! Forget the handles in  handles (the entities were replaced).
     void invalidateHandles(const QJsonArray &handles);
+    //! The entity behind the handle in args[\a name] (lookupEntity() reads
+    //! "handle"; the two-entity modify ops name theirs).
+    Plug_Entity *lookupNamedEntity(const QJsonObject &args, const QString &name) const;
+    //! Before replacing the entities behind \a handles: give the operation
+    //! its own undo step if any was created in the current one (see
+    //! NativeBridge::isolateReplacement).
+    void isolateReplacement(const QJsonArray &handles);
+    //! Shared tail of the selection transforms (move, rotate, ...): select
+    //! "handles", run \a apply, forget the handles when the originals were
+    //! replaced (\a copies == 0), and return the new entities.
+    template <typename Apply>
+    QJsonValue runSelectionTransform(const QJsonObject &args, int copies,
+                                     Apply apply);
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

@@ -200,6 +200,8 @@ NativeBridge::NativeBridge(QWidget *mainWindow, QObject *parent)
             m_reason += QStringLiteral("; ");
         m_reason += QStringLiteral("no current document in the application window");
     }
+    // execPlug() opened the session's undo cycle just before execComm().
+    snapshotCycleStart();
 
     m_hatchTimer = new QTimer(this);
     m_hatchTimer->setInterval(25);
@@ -453,6 +455,7 @@ void NativeBridge::ensureUndoCycle()
         return;
     m_document->startUndoCycle();   // discards the redo list, like any action
     m_undoCycleOpen = true;
+    snapshotCycleStart();
 }
 
 void NativeBridge::armHatchDialog(const QString &pattern, double scaleFactor,
@@ -502,6 +505,411 @@ void NativeBridge::pollForHatchDialog()
         m_hatchTimer->stop();
         QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
         return;
+    }
+}
+
+// --------------------------------------------------------------------------
+// Modify tools: the rest of RS_Modification
+// --------------------------------------------------------------------------
+
+namespace {
+
+//! Line type names as the plugin API spells them (convLTW in
+//! doc_plugin_interface.cpp), so change_attributes takes what entity data
+//! reports. The table is repeated rather than reached: LibreCAD's converter
+//! is a global object, and a data symbol would stop the plugin loading
+//! outside LibreCAD.
+bool lineTypeFromName(const QString &name, RS2::LineType *type)
+{
+    static const struct { const char *name; RS2::LineType type; } table[] = {
+        {"BYLAYER", RS2::LineByLayer},       {"BYBLOCK", RS2::LineByBlock},
+        {"SolidLine", RS2::SolidLine},
+        {"DotLine", RS2::DotLine},           {"DotLine2", RS2::DotLine2},
+        {"DotLineX2", RS2::DotLineX2},
+        {"DashLine", RS2::DashLine},         {"DashLine2", RS2::DashLine2},
+        {"DashLineX2", RS2::DashLineX2},
+        {"DashDotLine", RS2::DashDotLine},   {"DashDotLine2", RS2::DashDotLine2},
+        {"DashDotLineX2", RS2::DashDotLineX2},
+        {"DivideLine", RS2::DivideLine},     {"DivideLine2", RS2::DivideLine2},
+        {"DivideLineX2", RS2::DivideLineX2},
+        {"CenterLine", RS2::CenterLine},     {"CenterLine2", RS2::CenterLine2},
+        {"CenterLineX2", RS2::CenterLineX2},
+        {"BorderLine", RS2::BorderLine},     {"BorderLine2", RS2::BorderLine2},
+        {"BorderLineX2", RS2::BorderLineX2},
+    };
+    for (const auto &entry : table) {
+        if (name.compare(QLatin1String(entry.name), Qt::CaseInsensitive) == 0) {
+            *type = entry.type;
+            return true;
+        }
+    }
+    return false;
+}
+
+//! Line width names as the plugin API spells them ("0.25mm", "BYLAYER").
+bool lineWidthFromName(const QString &name, RS2::LineWidth *width)
+{
+    static const struct { const char *name; RS2::LineWidth width; } table[] = {
+        {"0.00mm", RS2::Width00}, {"0.05mm", RS2::Width01},
+        {"0.09mm", RS2::Width02}, {"0.13mm", RS2::Width03},
+        {"0.15mm", RS2::Width04}, {"0.18mm", RS2::Width05},
+        {"0.20mm", RS2::Width06}, {"0.25mm", RS2::Width07},
+        {"0.30mm", RS2::Width08}, {"0.35mm", RS2::Width09},
+        {"0.40mm", RS2::Width10}, {"0.50mm", RS2::Width11},
+        {"0.53mm", RS2::Width12}, {"0.60mm", RS2::Width13},
+        {"0.70mm", RS2::Width14}, {"0.80mm", RS2::Width15},
+        {"0.90mm", RS2::Width16}, {"1.00mm", RS2::Width17},
+        {"1.06mm", RS2::Width18}, {"1.20mm", RS2::Width19},
+        {"1.40mm", RS2::Width20}, {"1.58mm", RS2::Width21},
+        {"2.00mm", RS2::Width22}, {"2.11mm", RS2::Width23},
+        {"BYLAYER", RS2::WidthByLayer}, {"BYBLOCK", RS2::WidthByBlock},
+        {"BYDEFAULT", RS2::WidthDefault},
+    };
+    for (const auto &entry : table) {
+        if (name.compare(QLatin1String(entry.name), Qt::CaseInsensitive) == 0) {
+            *width = entry.width;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+bool NativeBridge::move(const QPointF &offset, int copies,
+                        bool useCurrentLayer, bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_MoveData data;
+    data.number = qMax(0, copies);
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    data.offset = toVector(offset);
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.move(data)) {
+        m_lastError = QStringLiteral("RS_Modification::move refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::rotate(const QPointF &center, double angle, int copies,
+                          bool useCurrentLayer, bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    // 2.2.1.5's RS_RotateData has a single angle; later versions add a
+    // second one for rotating the copies about their own reference point.
+    RS_RotateData data;
+    data.number = qMax(0, copies);
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    data.center = toVector(center);
+    data.angle = angle;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.rotate(data)) {
+        m_lastError = QStringLiteral("RS_Modification::rotate refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::scale(const QPointF &center, const QPointF &factor,
+                         int copies, bool useCurrentLayer,
+                         bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    // isotropicScaling and toFindFactor only steer the GUI action's point
+    // prompts; RS_Modification::scale reads referencePoint and factor.
+    RS_ScaleData data;
+    data.referencePoint = toVector(center);
+    data.factor = toVector(factor);
+    data.number = qMax(0, copies);
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    data.isotropicScaling = qFuzzyCompare(factor.x(), factor.y());
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.scale(data)) {
+        m_lastError = QStringLiteral("RS_Modification::scale refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::moveRotate(const QPointF &offset, const QPointF &center,
+                              double angle, int copies, bool useCurrentLayer,
+                              bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_MoveRotateData data;
+    data.number = qMax(0, copies);
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    data.referencePoint = toVector(center);
+    data.offset = toVector(offset);
+    data.angle = angle;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.moveRotate(data)) {
+        m_lastError = QStringLiteral("RS_Modification::moveRotate refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::rotate2(const QPointF &center1, const QPointF &center2,
+                           double angle1, double angle2, int copies,
+                           bool useCurrentLayer, bool useCurrentAttributes)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Rotate2Data data;
+    data.number = qMax(0, copies);
+    data.useCurrentLayer = useCurrentLayer;
+    data.useCurrentAttributes = useCurrentAttributes;
+    data.center1 = toVector(center1);
+    data.center2 = toVector(center2);
+    data.angle1 = angle1;
+    data.angle2 = angle2;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.rotate2(data)) {
+        m_lastError = QStringLiteral("RS_Modification::rotate2 refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::stretch(const QPointF &firstCorner,
+                           const QPointF &secondCorner, const QPointF &offset)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.stretch(toVector(firstCorner), toVector(secondCorner),
+                              toVector(offset))) {
+        m_lastError = QStringLiteral("RS_Modification::stretch refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::round(Plug_Entity *entity1, const QPointF &point1,
+                         Plug_Entity *entity2, const QPointF &point2,
+                         const QPointF &corner, double radius, bool trim)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Entity *first = underlyingEntity(entity1);
+    RS_Entity *second = underlyingEntity(entity2);
+    if (!first || !second) {
+        m_lastError = QStringLiteral("entity not found");
+        return false;
+    }
+    if (first == second) {
+        m_lastError = QStringLiteral("a fillet needs two different entities");
+        return false;
+    }
+    if (!first->isAtomic() || !second->isAtomic()) {
+        m_lastError = QStringLiteral("only atomic entities (line, arc, "
+                                     "circle, ellipse) can be filleted");
+        return false;
+    }
+    RS_RoundData data;
+    data.radius = radius;
+    data.trim = trim;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.round(toVector(corner),
+                            toVector(point1), static_cast<RS_AtomicEntity *>(first),
+                            toVector(point2), static_cast<RS_AtomicEntity *>(second),
+                            data)) {
+        m_lastError = QStringLiteral("RS_Modification::round refused (no "
+                                     "fillet of that radius fits, or "
+                                     "locked/hidden)");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::bevel(Plug_Entity *entity1, const QPointF &point1,
+                         Plug_Entity *entity2, const QPointF &point2,
+                         double length1, double length2, bool trim)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Entity *first = underlyingEntity(entity1);
+    RS_Entity *second = underlyingEntity(entity2);
+    if (!first || !second) {
+        m_lastError = QStringLiteral("entity not found");
+        return false;
+    }
+    if (first == second) {
+        m_lastError = QStringLiteral("a chamfer needs two different entities");
+        return false;
+    }
+    if (!first->isAtomic() || !second->isAtomic()) {
+        m_lastError = QStringLiteral("only atomic entities (line, arc, "
+                                     "circle, ellipse) can be chamfered");
+        return false;
+    }
+    RS_BevelData data;
+    data.length1 = length1;
+    data.length2 = length2;
+    data.trim = trim;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.bevel(toVector(point1), static_cast<RS_AtomicEntity *>(first),
+                            toVector(point2), static_cast<RS_AtomicEntity *>(second),
+                            data)) {
+        m_lastError = QStringLiteral("RS_Modification::bevel refused (the "
+                                     "entities do not intersect, or "
+                                     "locked/hidden)");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::cut(Plug_Entity *entity, const QPointF &point)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Entity *target = underlyingEntity(entity);
+    if (!target) {
+        m_lastError = QStringLiteral("entity not found");
+        return false;
+    }
+    if (!target->isAtomic()) {
+        m_lastError = QStringLiteral("only atomic entities (line, arc, "
+                                     "circle, ellipse) can be cut");
+        return false;
+    }
+    // The cut action only fires with a point on the entity (it snaps the
+    // mouse there); RS_Modification::cut trusts that and would trim to an
+    // off-entity point. Project, the way the snap would.
+    const RS_Vector at = target->getNearestPointOnEntity(toVector(point), true);
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.cut(at, static_cast<RS_AtomicEntity *>(target))) {
+        m_lastError = QStringLiteral("RS_Modification::cut refused (the point "
+                                     "is an endpoint, or locked/hidden)");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::isLineTypeName(const QString &name)
+{
+    RS2::LineType type;
+    return lineTypeFromName(name, &type);
+}
+
+bool NativeBridge::isLineWidthName(const QString &name)
+{
+    RS2::LineWidth width;
+    return lineWidthFromName(name, &width);
+}
+
+bool NativeBridge::changeAttributes(const AttributeChange &change)
+{
+    if (!modificationAvailable())
+        return false;
+    RS_AttributesData data;
+    if (change.changeLayer) {
+        data.changeLayer = true;
+        data.layer = change.layer;
+    }
+    if (change.changeColor) {
+        // fromIntColor is the plugin API's own int -> RS_Color conversion
+        // (Plugin_Entity::updateData uses it), so the encodings agree.
+        RS_Color color(0, 0, 0);
+        color.fromIntColor(change.color);
+        data.pen.setColor(color);
+        data.changeColor = true;
+    }
+    if (change.changeLineType) {
+        RS2::LineType type = RS2::LineByLayer;
+        if (!lineTypeFromName(change.lineType, &type)) {
+            m_lastError = QStringLiteral("unknown line type \"%1\"")
+                              .arg(change.lineType);
+            return false;
+        }
+        data.pen.setLineType(type);
+        data.changeLineType = true;
+    }
+    if (change.changeWidth) {
+        RS2::LineWidth width = RS2::WidthByLayer;
+        if (!lineWidthFromName(change.width, &width)) {
+            m_lastError = QStringLiteral("unknown line width \"%1\"")
+                              .arg(change.width);
+            return false;
+        }
+        data.pen.setWidth(width);
+        data.changeWidth = true;
+    }
+    RS_Modification modification(*m_document, m_graphicView, true);
+    if (!modification.changeAttributes(data)) {
+        m_lastError = QStringLiteral("RS_Modification::changeAttributes refused");
+        return false;
+    }
+    return true;
+}
+
+bool NativeBridge::revertDirection()
+{
+    if (!modificationAvailable())
+        return false;
+    RS_Modification modification(*m_document, m_graphicView, true);
+    modification.revertDirection();   // void: it cannot refuse
+    return true;
+}
+
+void NativeBridge::snapshotCycleStart()
+{
+    m_cycleStartKeys.clear();
+    if (!modificationAvailable())
+        return;
+    // Top-level entities only, undone ones included: that is the level the
+    // bridge's handles and RS_Modification's replacements live at.
+    for (RS_Entity *entity : *m_document)
+        m_cycleStartKeys.insert(entity);
+}
+
+void NativeBridge::splitUndoCycle()
+{
+    undoCheckpoint();
+    ensureUndoCycle();
+}
+
+void NativeBridge::isolateReplacement(const QList<Plug_Entity *> &replaced)
+{
+    if (!modificationAvailable() || !m_undoCycleOpen)
+        return;
+    for (Plug_Entity *entity : replaced) {
+        RS_Entity *rsEntity = underlyingEntity(entity);
+        if (rsEntity && !m_cycleStartKeys.contains(rsEntity)) {
+            splitUndoCycle();
+            return;
+        }
+    }
+}
+
+void NativeBridge::isolateStretch(const QPointF &firstCorner,
+                                  const QPointF &secondCorner)
+{
+    if (!modificationAvailable() || !m_undoCycleOpen)
+        return;
+    const RS_Vector v1 = toVector(firstCorner);
+    const RS_Vector v2 = toVector(secondCorner);
+    // The same test RS_Modification::stretch applies.
+    for (RS_Entity *entity : *m_document) {
+        if (!entity || m_cycleStartKeys.contains(entity) || !entity->isVisible()
+            || entity->isLocked()) {
+            continue;
+        }
+        if (entity->isInWindow(v1, v2)
+            || entity->hasEndpointsWithinWindow(v1, v2)) {
+            splitUndoCycle();
+            return;
+        }
     }
 }
 

@@ -178,7 +178,18 @@ def main() -> int:
                          lambda: doc.undo_checkpoint(),
                          lambda: doc.undo(),
                          lambda: doc.open("/nonexistent.dxf"),
-                         lambda: doc.new()):
+                         lambda: doc.new(),
+                         lambda: doc.move([probe], (1, 0)),
+                         lambda: doc.rotate([probe], (0, 0), 0.5, copies=2),
+                         lambda: doc.scale([probe], (0, 0), 2),
+                         lambda: doc.move_rotate([probe], (1, 0), (0, 0), 0.5),
+                         lambda: doc.rotate2([probe], (0, 0), (1, 0), 0.5, 0.5),
+                         lambda: doc.stretch((0, 0), (1, 1), (1, 0)),
+                         lambda: doc.fillet(probe, (0, 0), probe, (1, 1), 1),
+                         lambda: doc.chamfer(probe, (0, 0), probe, (1, 1), 1),
+                         lambda: doc.cut(probe, (0, 0)),
+                         lambda: doc.change_attributes([probe], color="bylayer"),
+                         lambda: doc.revert_direction([probe])):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

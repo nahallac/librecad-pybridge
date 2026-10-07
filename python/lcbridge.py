@@ -277,14 +277,24 @@ class Entity:
 
     # -- modification (handle survives) ---------------------------------------
 
+    # These go through the plugin API and keep the handle. Document.move(),
+    # rotate(), scale(), move_rotate() run LibreCAD's own modify tools
+    # instead: several entities at once, n copies, current layer/attributes.
+
     def move(self, offset: Any, keep_original: bool = False) -> "Entity":
+        """Move by ``offset`` (dx, dy) through the plugin API.
+
+        The handle survives. For copies or several entities at once, see
+        Document.move(), which runs LibreCAD's Move tool.
+        """
         self._call("entity_move", offset=_pt(offset), keep_original=keep_original)
         self._data = None
         return self
 
     def rotate(self, center: Any, angle: float,
                keep_original: bool = False) -> "Entity":
-        """Rotate by ``angle`` radians around ``center``."""
+        """Rotate by ``angle`` radians around ``center`` (plugin API; the
+        handle survives). Document.rotate() is the Rotate tool, with copies."""
         self._call("entity_rotate", center=_pt(center), angle=float(angle),
                    keep_original=keep_original)
         self._data = None
@@ -299,7 +309,11 @@ class Entity:
 
     def scale(self, center: Any, factor: Any,
               keep_original: bool = False) -> "Entity":
-        """``factor`` is (fx, fy); pass the same value twice for uniform."""
+        """``factor`` is (fx, fy); pass the same value twice for uniform.
+
+        Plugin API; the handle survives. Document.scale() is the Scale tool,
+        with copies and a single-number factor.
+        """
         self._call("entity_scale", center=_pt(center), factor=_pt(factor),
                    keep_original=keep_original)
         self._data = None
@@ -1105,3 +1119,194 @@ class Document:
                        handles=[entity._handle for entity in entities],
                        pattern=pattern, scale=float(scale),
                        angle=float(angle), solid=solid)
+
+    # -- more modify tools (RS_Modification; need a real LibreCAD session) ----
+    #
+    # The transforms below differ from Entity.move()/rotate()/scale(), which
+    # go through the plugin API: these run LibreCAD's own modify-tool code on
+    # many entities at once, can make ``copies`` (at 1x, 2x, ... the
+    # transformation), and honour use_current_layer/use_current_attributes.
+    # With copies=0 (the default) the originals are replaced by transformed
+    # clones and become stale -- use the returned entities from then on. With
+    # copies >= 1 the originals stay and only the copies are returned.
+
+    def _transform(self, op: str, entities: list["Entity"], copies: int,
+                   use_current_layer: bool, use_current_attributes: bool,
+                   **args: Any) -> list[Entity]:
+        rows = self._call_now(
+            op, handles=[e._handle for e in entities], copies=int(copies),
+            use_current_layer=use_current_layer,
+            use_current_attributes=use_current_attributes, **args)
+        if int(copies) == 0:
+            self._retire(entities)
+        return self._rows(rows)
+
+    def move(self, entities: list["Entity"], offset: Any, copies: int = 0,
+             use_current_layer: bool = False,
+             use_current_attributes: bool = False) -> list[Entity]:
+        """Move ``entities`` by ``offset`` (dx, dy) with the Move tool.
+
+        ``copies`` >= 1 keeps the originals and adds that many copies at
+        offset, 2*offset, ...; 0 moves the originals (replaced, stale).
+        Returns the moved entities or the copies.
+        """
+        return self._transform("mod_move", entities, copies, use_current_layer,
+                               use_current_attributes, offset=_pt(offset))
+
+    def rotate(self, entities: list["Entity"], center: Any, angle: float,
+               copies: int = 0, use_current_layer: bool = False,
+               use_current_attributes: bool = False) -> list[Entity]:
+        """Rotate ``entities`` by ``angle`` radians around ``center``.
+        Copies go at angle, 2*angle, ...; see move() for ``copies``."""
+        return self._transform("mod_rotate", entities, copies,
+                               use_current_layer, use_current_attributes,
+                               center=_pt(center), angle=float(angle))
+
+    def scale(self, entities: list["Entity"], center: Any, factor: Any,
+              copies: int = 0, use_current_layer: bool = False,
+              use_current_attributes: bool = False) -> list[Entity]:
+        """Scale ``entities`` around ``center``.
+
+        ``factor`` is a number (uniform) or (fx, fy); unequal factors turn
+        circles and arcs into ellipses, as in LibreCAD. Copies are scaled by
+        factor, factor**2, ...; see move() for ``copies``.
+        """
+        if isinstance(factor, (int, float)):
+            factor_arg: Any = float(factor)
+        else:
+            factor_arg = _pt(factor)
+        return self._transform("mod_scale", entities, copies,
+                               use_current_layer, use_current_attributes,
+                               center=_pt(center), factor=factor_arg)
+
+    def move_rotate(self, entities: list["Entity"], offset: Any, center: Any,
+                    angle: float, copies: int = 0,
+                    use_current_layer: bool = False,
+                    use_current_attributes: bool = False) -> list[Entity]:
+        """Move by ``offset``, then rotate by ``angle`` radians around
+        ``center`` + offset (the reference point travels with the move).
+        Copy n uses n*offset and n*angle; see move() for ``copies``."""
+        return self._transform("mod_move_rotate", entities, copies,
+                               use_current_layer, use_current_attributes,
+                               offset=_pt(offset), center=_pt(center),
+                               angle=float(angle))
+
+    def rotate2(self, entities: list["Entity"], center1: Any, center2: Any,
+                angle1: float, angle2: float, copies: int = 0,
+                use_current_layer: bool = False,
+                use_current_attributes: bool = False) -> list[Entity]:
+        """Rotate by ``angle1`` around ``center1``, then by ``angle2`` around
+        ``center2`` (itself carried along by the first rotation). Radians;
+        see move() for ``copies``."""
+        return self._transform("mod_rotate2", entities, copies,
+                               use_current_layer, use_current_attributes,
+                               center1=_pt(center1), center2=_pt(center2),
+                               angle1=float(angle1), angle2=float(angle2))
+
+    def stretch(self, first_corner: Any, second_corner: Any,
+                offset: Any) -> list[Entity]:
+        """Stretch by ``offset`` everything in the window between the corners.
+
+        Works on the drawing, not on given entities, like the Stretch tool:
+        entities wholly inside the window move, entities with an endpoint
+        inside have those endpoints moved. Every touched entity is replaced;
+        the replacements are returned. Entity objects you hold for touched
+        entities are dead afterwards (the bridge answers no_such_handle), but
+        this side cannot tell which they were, so they are not marked stale
+        -- re-fetch with entities(). The selection is cleared first: LibreCAD
+        would otherwise delete whatever was selected.
+        """
+        return self._rows(self._call_now(
+            "mod_stretch", first_corner=_pt(first_corner),
+            second_corner=_pt(second_corner), offset=_pt(offset)))
+
+    def fillet(self, entity1: "Entity", point1: Any, entity2: "Entity",
+               point2: Any, radius: float, trim: bool = True,
+               corner: Any = None) -> list[Entity]:
+        """Round the corner between two lines/arcs/circles with an arc.
+
+        ``point1`` and ``point2`` lie on the parts of each entity to keep.
+        ``corner`` is a point on the side of both entities where the arc
+        belongs (LibreCAD's "round" offsets each entity toward it); it
+        defaults to the midpoint of point1 and point2, which is inside the
+        corner for picks on the kept parts. ``trim`` cuts both entities back
+        to the arc; they are then replaced (stale). Returns the new arc and,
+        when trimming, the trimmed entities.
+        """
+        args: dict[str, Any] = dict(
+            entity1=entity1._handle, point1=_pt(point1),
+            entity2=entity2._handle, point2=_pt(point2),
+            radius=float(radius), trim=trim)
+        if corner is not None:
+            args["corner"] = _pt(corner)
+        rows = self._call_now("mod_round", **args)
+        if trim:
+            self._retire([entity1, entity2])
+        return self._rows(rows)
+
+    def chamfer(self, entity1: "Entity", point1: Any, entity2: "Entity",
+                point2: Any, length1: float, length2: float | None = None,
+                trim: bool = True) -> list[Entity]:
+        """Bevel the corner between two entities with a straight line.
+
+        The chamfer starts ``length1`` from the intersection along entity1
+        and ``length2`` (default: length1) along entity2; ``point1`` and
+        ``point2`` lie on the parts to keep. ``trim`` cuts both entities back
+        to the chamfer; they are then replaced (stale). Returns the chamfer
+        line and, when trimming, the trimmed entities.
+        """
+        rows = self._call_now(
+            "mod_bevel", entity1=entity1._handle, point1=_pt(point1),
+            entity2=entity2._handle, point2=_pt(point2),
+            length1=float(length1),
+            length2=float(length1 if length2 is None else length2), trim=trim)
+        if trim:
+            self._retire([entity1, entity2])
+        return self._rows(rows)
+
+    def cut(self, entity: "Entity", point: Any) -> list[Entity]:
+        """Split a line, arc, circle, or ellipse at ``point``.
+
+        ``point`` is projected onto the entity first, as LibreCAD's snap
+        would. The original is replaced (stale) by two pieces -- or, for a
+        circle, by a single full-turn arc starting and ending at the point.
+        Endpoints cannot be cut at.
+        """
+        rows = self._call_now("mod_cut", handle=entity._handle,
+                              point=_pt(point))
+        self._retire([entity])
+        return self._rows(rows)
+
+    def change_attributes(self, entities: list["Entity"],
+                          layer: str | None = None, color: Any = None,
+                          width: str | None = None,
+                          linetype: str | None = None) -> list[Entity]:
+        """Set layer, color, line width, and/or line type on ``entities``.
+
+        Formats are those of entity data: ``color`` an RGB int, -1 / -2 or
+        "bylayer" / "byblock"; ``width`` a lineweight name ("0.25mm",
+        "BYLAYER", ...); ``linetype`` a name ("DashLine", "BYLAYER", ...);
+        ``layer`` must exist. Every entity is replaced (stale) by a
+        re-attributed clone; the clones are returned.
+        """
+        args: dict[str, Any] = {}
+        if layer is not None:
+            args["layer"] = layer
+        if color is not None:
+            args["color"] = color
+        if width is not None:
+            args["width"] = width
+        if linetype is not None:
+            args["linetype"] = linetype
+        rows = self._call_now("mod_change_attributes",
+                              handles=[e._handle for e in entities], **args)
+        self._retire(entities)
+        return self._rows(rows)
+
+    def revert_direction(self, entities: list["Entity"]) -> list[Entity]:
+        """Swap start and end of each entity (lines, arcs, polylines, ...).
+        The originals are replaced (stale); the reversed clones returned."""
+        rows = self._call_now("mod_revert_direction",
+                              handles=[e._handle for e in entities])
+        self._retire(entities)
+        return self._rows(rows)
