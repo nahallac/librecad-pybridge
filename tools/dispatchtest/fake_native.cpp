@@ -32,6 +32,8 @@ bool NativeBridge::commandsAvailable() const { return false; }
 bool NativeBridge::selectionAvailable() const { return false; }
 bool NativeBridge::execCommand(const QString &) { return false; }
 bool NativeBridge::setSelected(Plug_Entity *, bool) { return false; }
+bool NativeBridge::isSelected(Plug_Entity *, bool *) const { return false; }
+bool NativeBridge::boundingBox(Plug_Entity *, QPointF *, QPointF *) const { return false; }
 void NativeBridge::armHatchDialog(const QString &, double, double, bool, int) {}
 void NativeBridge::disarmHatchDialog() {}
 void NativeBridge::pollForHatchDialog() {}

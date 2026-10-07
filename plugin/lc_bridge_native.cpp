@@ -150,6 +150,35 @@ bool NativeBridge::setSelected(Plug_Entity *entity, bool selected)
     return true;
 }
 
+bool NativeBridge::isSelected(Plug_Entity *entity, bool *selected) const
+{
+    if (!selectionAvailable())
+        return false;
+    RS_Entity *rsEntity = underlyingEntity(entity);
+    if (!rsEntity)
+        return false;
+    *selected = rsEntity->isSelected();
+    return true;
+}
+
+bool NativeBridge::boundingBox(Plug_Entity *entity, QPointF *min,
+                               QPointF *max) const
+{
+    if (!m_versionOk)
+        return false;
+    RS_Entity *rsEntity = underlyingEntity(entity);
+    if (!rsEntity)
+        return false;
+    // Inline accessors returning RS_Vector by value; x, y, valid are public.
+    const RS_Vector lo = rsEntity->getMin();
+    const RS_Vector hi = rsEntity->getMax();
+    if (!lo.valid || !hi.valid)
+        return false;
+    *min = QPointF(lo.x, lo.y);
+    *max = QPointF(hi.x, hi.y);
+    return true;
+}
+
 void NativeBridge::armHatchDialog(const QString &pattern, double scaleFactor,
                                   double angleDegrees, bool solid, int timeoutMs)
 {

@@ -566,6 +566,9 @@ const QHash<QString, Dispatcher::Handler> &Dispatcher::handlers()
         {QStringLiteral("native_status"),        &Dispatcher::opNativeStatus},
         {QStringLiteral("exec_command"),         &Dispatcher::opExecCommand},
         {QStringLiteral("select_entities"),      &Dispatcher::opSelectEntities},
+        {QStringLiteral("entity_selected"),      &Dispatcher::opEntitySelected},
+        {QStringLiteral("entity_bbox"),          &Dispatcher::opEntityBbox},
+        {QStringLiteral("get_bbox"),             &Dispatcher::opGetBbox},
         {QStringLiteral("cmd_dim"),              &Dispatcher::opCmdDim},
         {QStringLiteral("cmd_hatch"),            &Dispatcher::opCmdHatch},
     };
@@ -944,6 +947,11 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
 
     const bool visibleOnly = optionalBool(args, QStringLiteral("visible_only"), false);
     const bool includeData = optionalBool(args, QStringLiteral("include_data"), true);
+    // The selection flag is not in the attribute hash (only VISIBLE is), so
+    // filtering on it goes through the native layer; see risk 8.
+    const bool selectedOnly = optionalBool(args, QStringLiteral("selected_only"), false);
+    if (selectedOnly)
+        requireNativeEntityAccess();
 
     QList<Plug_Entity *> entities;
     if (!m_doc->getAllEntities(&entities, visibleOnly)) {
@@ -968,6 +976,13 @@ QJsonValue Dispatcher::opGetEntities(const QJsonObject &args)
         if (!wanted.isEmpty() && !wanted.contains(type)) {
             delete entity;
             continue;
+        }
+        if (selectedOnly) {
+            bool selected = false;
+            if (!m_native->isSelected(entity, &selected) || !selected) {
+                delete entity;
+                continue;
+            }
         }
 
         QJsonObject item;
@@ -1220,6 +1235,29 @@ void Dispatcher::requireNative() const
     }
 }
 
+void Dispatcher::requireNativeEntityAccess() const
+{
+    if (!m_native || !m_native->selectionAvailable())
+        nativeUnavailable();
+}
+
+namespace {
+
+QJsonArray pointJson(const QPointF &point)
+{
+    return QJsonArray{point.x(), point.y()};
+}
+
+QJsonObject bboxJson(const QPointF &min, const QPointF &max)
+{
+    QJsonObject box;
+    box.insert(QStringLiteral("min"), pointJson(min));
+    box.insert(QStringLiteral("max"), pointJson(max));
+    return box;
+}
+
+} // namespace
+
 int Dispatcher::countEntitiesOfType(int dpiType)
 {
     QList<Plug_Entity *> entities;
@@ -1297,6 +1335,75 @@ QJsonValue Dispatcher::opSelectEntities(const QJsonObject &args)
             ++selected;
     }
     return selected;
+}
+
+QJsonValue Dispatcher::opEntitySelected(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    bool selected = false;
+    if (!m_native->isSelected(lookupEntity(args), &selected)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("could not read the selection flag"));
+    }
+    return selected;
+}
+
+QJsonValue Dispatcher::opEntityBbox(const QJsonObject &args)
+{
+    requireNativeEntityAccess();
+    QPointF min, max;
+    if (!m_native->boundingBox(lookupEntity(args), &min, &max)) {
+        throw RequestError(QStringLiteral("failed"),
+                           QStringLiteral("the entity has no valid extent"));
+    }
+    return bboxJson(min, max);
+}
+
+QJsonValue Dispatcher::opGetBbox(const QJsonObject &args)
+{
+    // Union of the boxes of "handles", or of every entity in the drawing when
+    // no handles are given. Entities without a valid extent are skipped; null
+    // when nothing contributed.
+    requireNativeEntityAccess();
+
+    QList<Plug_Entity *> owned;   // fetched here, released before returning
+    QList<Plug_Entity *> entities;
+    if (args.contains(QStringLiteral("handles"))) {
+        const QJsonArray handles = requireArray(args, QStringLiteral("handles"), 0);
+        for (int i = 0; i < handles.size(); ++i) {
+            if (!handles.at(i).isDouble())
+                badArgs(QStringLiteral("\"handles\"[%1] must be a number").arg(i));
+            QJsonObject lookup;
+            lookup.insert(QStringLiteral("handle"), handles.at(i));
+            entities.append(lookupEntity(lookup));
+        }
+    } else {
+        if (!m_doc->getAllEntities(&owned, false)) {
+            throw RequestError(QStringLiteral("failed"),
+                               QStringLiteral("getAllEntities() failed"));
+        }
+        entities = owned;
+    }
+
+    bool any = false;
+    QPointF lo, hi;
+    for (Plug_Entity *entity : entities) {
+        QPointF min, max;
+        if (!m_native->boundingBox(entity, &min, &max))
+            continue;
+        if (!any) {
+            lo = min;
+            hi = max;
+            any = true;
+        } else {
+            lo = QPointF(qMin(lo.x(), min.x()), qMin(lo.y(), min.y()));
+            hi = QPointF(qMax(hi.x(), max.x()), qMax(hi.y(), max.y()));
+        }
+    }
+    qDeleteAll(owned);
+    if (!any)
+        return QJsonValue();
+    return bboxJson(lo, hi);
 }
 
 QJsonValue Dispatcher::opCmdDim(const QJsonObject &args)

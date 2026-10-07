@@ -244,6 +244,22 @@ class Entity:
         self._data = result["data"]
         return self
 
+    # -- native reads (need a real LibreCAD session) ---------------------------
+
+    @property
+    def selected(self) -> bool:
+        """Whether the entity is currently selected in LibreCAD.
+
+        Read from the engine (RS_Entity::isSelected); the plugin API itself
+        only offers a prompt. Raises BridgeError("unavailable") on the stub.
+        """
+        return bool(self._call("entity_selected"))
+
+    def bbox(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """((xmin, ymin), (xmax, ymax)) as LibreCAD keeps it for the entity."""
+        box = self._call("entity_bbox")
+        return (tuple(box["min"]), tuple(box["max"]))
+
     # -- modification (handle survives) ---------------------------------------
 
     def move(self, offset: Any, keep_original: bool = False) -> "Entity":
@@ -566,15 +582,20 @@ class Document:
     # -- query ----------------------------------------------------------------
 
     def entities(self, types: list[str] | None = None,
-                 visible_only: bool = False) -> list[Entity]:
+                 visible_only: bool = False,
+                 selected_only: bool = False) -> list[Entity]:
         """Entities in the drawing, optionally filtered by type name.
 
-        Each call hands out fresh handles; call release() (or let the session
-        end) when a large result set is no longer needed.
+        ``selected_only`` keeps only what is currently selected in LibreCAD
+        (a native read; unavailable on the stub). Each call hands out fresh
+        handles; call release() (or let the session end) when a large result
+        set is no longer needed.
         """
         args: dict[str, Any] = {"visible_only": visible_only}
         if types:
             args["types"] = [t.upper() for t in types]
+        if selected_only:
+            args["selected_only"] = True
         rows = self._call_now("get_entities", **args)
         return [Entity(self, row["handle"], row["type"], row.get("data"))
                 for row in rows]
@@ -797,6 +818,20 @@ class Document:
             "select_entities",
             handles=[entity._handle for entity in entities],
             deselect_others=deselect_others)
+
+    def bbox(self, entities: list["Entity"] | None = None
+             ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        """Union bounding box of ``entities``, or of the whole drawing.
+
+        ((xmin, ymin), (xmax, ymax)); None when nothing has an extent.
+        """
+        args: dict[str, Any] = {}
+        if entities is not None:
+            args["handles"] = [entity._handle for entity in entities]
+        box = self._call_now("get_bbox", **args)
+        if box is None:
+            return None
+        return (tuple(box["min"]), tuple(box["max"]))
 
     def cad_dim(self, kind: str, p1: Any, p2: Any, dimline: Any) -> None:
         """A real DIMENSION entity via LibreCAD's own dimension action.

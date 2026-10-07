@@ -160,9 +160,14 @@ def main() -> int:
         check({"commands", "selection", "reason"} <= set(status),
               "native_status shape")
         if not status["commands"]:
+            probe = doc.entities(types=["CIRCLE"])[0]
             for call in (lambda: doc.exec_command("zoom"),
                          lambda: doc.cad_dim_aligned((0, 0), (10, 0), (5, 5)),
-                         lambda: doc.cad_hatch([])):
+                         lambda: doc.cad_hatch([]),
+                         lambda: probe.selected,
+                         lambda: probe.bbox(),
+                         lambda: doc.bbox(),
+                         lambda: doc.entities(selected_only=True)):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")

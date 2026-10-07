@@ -146,6 +146,9 @@ private:
     QJsonValue opNativeStatus(const QJsonObject &args);
     QJsonValue opExecCommand(const QJsonObject &args);
     QJsonValue opSelectEntities(const QJsonObject &args);
+    QJsonValue opEntitySelected(const QJsonObject &args);
+    QJsonValue opEntityBbox(const QJsonObject &args);
+    QJsonValue opGetBbox(const QJsonObject &args);
     QJsonValue opCmdDim(const QJsonObject &args);
     QJsonValue opCmdHatch(const QJsonObject &args);
 
@@ -155,6 +158,9 @@ private:
     int selectAll(bool selected);
     [[noreturn]] void nativeUnavailable() const;
     void requireNative() const;
+    //! Reads (selection flag, bounding box) need the engine but not the
+    //! command widget.
+    void requireNativeEntityAccess() const;
 
     Document_Interface *m_doc {nullptr};
     NativeBridge *m_native {nullptr};

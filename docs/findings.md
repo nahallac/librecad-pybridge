@@ -271,6 +271,10 @@ What the bridge can offer instead:
   exposes.
 - A deliberately interactive `prompt_selection` operation later, which blocks until the user picks.
   That matches what the API actually does and is honest about the wait.
+- **Superseded by the native layer (2026-10-06):** with the engine headers in reach,
+  `RS_Entity::isSelected()` is one virtual call away, so `entity_selected` and
+  `get_entities {selected_only: true}` read the real selection; `entity_bbox` / `get_bbox` read
+  `RS_Entity::getMin()/getMax()` the same way. Both are gated like every native operation.
 
 Note also that `killAllActions()` call: a prompt cancels whatever the user was in the middle of.
 

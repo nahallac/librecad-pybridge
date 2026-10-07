@@ -112,6 +112,10 @@ doc.cad_hatch(boundary, pattern="ANSI31", scale=10.0)
 doc.exec_command("zoomauto")                         # raw command-line access
 ```
 
+The same access reads what the plugin API will not say: `entity.selected`, `entity.bbox()`,
+`doc.bbox()` (union over given entities or the whole drawing), and
+`doc.entities(selected_only=True)` — the current selection, straight from the engine.
+
 `python/examples/native_demo.py` draws a hatched, dimensioned plate. See `docs/findings.md`,
 "Native access", for how this works and what it depends on.
 
@@ -174,7 +178,9 @@ Run `{"op": "operations"}` for the current list. Deliberately absent: the intera
 (`getPoint`, `getEnt`, `getSelect`, `getSelectByType`, `getInt`, `getReal`, `getString`). Each one
 spins a nested Qt event loop and cancels whatever action the user had in progress, so they need a
 design of their own — see `docs/findings.md` risks 6 and 8. One consequence is worth knowing now:
-**there is no way to read the current selection**, only to prompt for a new one.
+**the plugin API cannot read the current selection**, only prompt for a new one. The native
+layer fills that gap (`entity_selected`, `get_entities` with `selected_only`, and the bounding
+box reads `entity_bbox` / `get_bbox`), where it is available.
 
 ## Layout
 

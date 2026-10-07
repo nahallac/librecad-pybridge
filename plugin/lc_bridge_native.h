@@ -33,6 +33,7 @@
 #define LC_BRIDGE_NATIVE_H
 
 #include <QObject>
+#include <QPointF>
 #include <QString>
 
 class Plug_Entity;
@@ -72,6 +73,13 @@ public:
 
     //! Select or deselect the entity behind a Plug_Entity wrapper.
     bool setSelected(Plug_Entity *entity, bool selected);
+    //! Read the selection flag. The plugin API has no query for it (its
+    //! getSelect() is a prompt); RS_Entity::isSelected() is the real one.
+    bool isSelected(Plug_Entity *entity, bool *selected) const;
+    //! The entity's bounding box as LibreCAD keeps it (RS_Entity::getMin/
+    //! getMax, maintained by calculateBorders()). False when unavailable or
+    //! when the entity has no valid extent.
+    bool boundingBox(Plug_Entity *entity, QPointF *min, QPointF *max) const;
 
     //! Start watching for the hatch dialog. When it appears, fill it in and
     //! accept it. armed() stays true until the dialog was handled or
