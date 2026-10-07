@@ -173,6 +173,52 @@ times out.
 `python/examples/native_demo.py` draws a hatched, dimensioned plate through all of this. See
 `docs/findings.md`, "Native access", for how it works and what it depends on.
 
+### Prompts and events
+
+**Prompts** ask the person at LibreCAD for input and block until they answer:
+
+```python
+p = doc.prompt_point("Door hinge:", base=(0, 0))   # click, or type 10,20 on the command line
+picked = doc.prompt_select("Walls to thicken, then Enter")   # list[Entity]
+n = doc.prompt_int("How many shelves?", default=4)  # LibreCAD input dialogs
+w = doc.prompt_real("Width:", default=600.0)
+s = doc.prompt_string("Label:", timeout=30)         # None if unanswered after 30 s
+```
+
+Each returns `None` when cancelled. While a prompt waits, the session serves nothing else, so the
+client lifts its socket timeout for the call; `timeout=` (seconds) instead has the plugin cancel
+the prompt itself (native layer). Point and select prompts end whatever action the user had
+running. `prompt_select` returns whatever is selected when the user finishes (Enter, Escape or a
+right click all finish it; anything already selected counts) — LibreCAD's own `getSelect()`
+reports every ending as a cancel, so the selection is read back through the native layer.
+
+**Events** are pushed by the plugin once subscribed; nothing is sent before that:
+
+```python
+doc.on("selection_changed", lambda e: print("selected:", e["data"]["count"]))
+doc.subscribe(["document_modified", "layer_changed"])
+while True:
+    for frame in doc.events(timeout=1.0):          # also runs the on() callbacks
+        print(frame["event"], frame["data"])
+```
+
+| Event | Data | Source |
+|---|---|---|
+| `entity_count_changed` | `count`, `previous` (live entities) | polled* |
+| `selection_changed` | `count`, `previous` (selected entities) | polled* |
+| `layer_changed` | `current`, `layers` | polled |
+| `document_modified` | `modified` | polled* |
+| `view_changed` | `factor`, `offset` (zoom/pan) | polled* |
+| `grid_changed` | `on` | polled* |
+| `windows_changed` | `windows_left` (the active drawing window changed) | Qt signal* |
+| `session_ending` | `reason`: `shutdown`, `file_open`, `file_new`, `stopped` | server |
+
+Polled events are checked every 100 ms while subscribed and report changes only (the entity and
+selection counts are one pass over the engine's entity list, skipping undone entities); none is
+polled during a request. A client that subscribes and never reads lets frames pile up in
+`doc.bridge.events`, a deque capped at 1000 (oldest dropped; `seq` gaps show it). Subscriptions
+belong to the connection; `open()`/`new()` renew them on the new session.
+
 ### Drawn dimensions
 
 The portable fallback: the API can also draw dimensions out of plain lines and text: extension lines, dimension line, tick or arrow
@@ -228,6 +274,25 @@ Conventions, uniform across every operation:
 - `batch` takes a list of requests and returns a list of responses, so bulk geometry is one message
   instead of a round trip per entity.
 
+**Event frames.** After `{"op": "subscribe", "args": {"events": ["selection_changed"]}}` (or
+`["*"]`) the server may also write unsolicited frames on the connection, same framing:
+
+```json
+{"event": "selection_changed", "seq": 4, "data": {"count": 2, "previous": 0}}
+```
+
+They have `"event"` and no `"ok"`, so a client tells them from responses by shape; one can arrive
+between a request and its response (the Python `Bridge` queues those in `Bridge.events`). Each is
+a whole line. Events a request causes are written after its response, except `session_ending`,
+which precedes the response to the `shutdown`/`file_open`/`file_new` that ends the session.
+`unsubscribe` takes the same `events` list (none: drop all); both reply `{"subscribed": [...],
+"available": [...]}`.
+
+**Prompts block.** `prompt_*` operations wait for the user, so the server answers nothing else
+meanwhile: call them with no socket timeout, or pass `timeout_ms` to have the plugin cancel the
+prompt. Replies are `{"cancelled": false, "point" | "entities" | "value": ...}` or
+`{"cancelled": true}` (plus `"timed_out": true` when `timeout_ms` fired).
+
 ### Operations
 
 `{"op": "operations"}` returns the live list. Grouped, with the Python method where it differs:
@@ -245,13 +310,13 @@ Conventions, uniform across every operation:
 | Undo* | `undo_checkpoint`, `undo`, `redo` |
 | Files* | `file_info`, `file_save`, `file_save_as` |
 | Session (server-level, not in the list) | `session`, `shutdown`, `file_open`* (`open`), `file_new`* (`new`) |
+| Prompts (blocking) | `prompt_point`, `prompt_select`, `prompt_int`, `prompt_real`, `prompt_string` — `timeout_ms`* optional |
+| Events (server-level, not in the list) | `subscribe`, `unsubscribe` (`on`, `events` in Python) |
 
 \* native layer; `unavailable` on a version mismatch or the stub.
 
-Deliberately absent: the interactive prompts (`getPoint`, `getEnt`, `getSelect`,
-`getSelectByType`, `getInt`, `getReal`, `getString`). Each one spins a nested Qt event loop and
-cancels whatever action the user had in progress, so they need a design of their own — see
-`docs/findings.md` risks 6 and 8.
+Still absent: `getEnt` and `getSelectByType`. `getEnt` dereferences its action after the action
+stack has deleted it whenever the user cancels; `prompt_select` covers both.
 
 ## Layout
 
@@ -267,6 +332,7 @@ plugin/
                              source tree (LIBRECAD_SRC), version-gated
   lc_bridge_selftest.{h,cpp} the fixed request sequence, shared by both runners
   lc_bridge_server.{h,cpp}   QLocalServer transport; session-level ops
+  lc_bridge_events.{h,cpp}   push events: polled state diffs, Qt signals
 python/
   pyproject.toml             pip packaging for the client (pip install -e python/)
   lcbridge.py                Python client, stdlib only: Bridge (protocol) +
@@ -322,8 +388,6 @@ Still missing, roughly in order of value:
 - View and windows: zoom, visible area, `file_close`, listing and switching documents (every
   `open()` leaves its window behind), export to PDF/SVG.
 - Queries: lengths, areas, intersections, nearest entity, stable entity ids across sessions.
-- The interactive prompts as explicit blocking operations, and push events (selection changed,
-  document modified) for live sync.
 
 The architecture note, for context. `docs/findings.md` risk 7 establishes that a plugin cannot
 hold a `Document_Interface*` past the end of `execComm()`: the object is stack-allocated by

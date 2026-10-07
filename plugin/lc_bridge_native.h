@@ -32,9 +32,12 @@
 #ifndef LC_BRIDGE_NATIVE_H
 #define LC_BRIDGE_NATIVE_H
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointF>
+#include <QPointer>
 #include <QString>
+#include <QVariant>
 
 class Plug_Entity;
 class QG_CommandWidget;
@@ -168,8 +171,40 @@ public:
     void disarmHatchDialog();
     bool hatchDialogHandled() const { return m_hatchDialogHandled; }
 
+    // ---- Prompts and push events --------------------------------------------
+    //! What a prompt waits on, which decides how cancelPrompt() ends it.
+    enum PromptKind { PointPrompt, SelectPrompt, DialogPrompt };
+    //! The application window given to the constructor (nullptr in the
+    //! offline stub). Its Qt signals (gridChanged(bool), ...) can be
+    //! connected by name without binding any LibreCAD symbol.
+    QWidget *mainWindow() const;
+    //! Watch the plugin-API prompt that is about to start. While armed, a
+    //! 25 ms timer fills \a dialogDefault into the QInputDialog that
+    //! getInt/getReal/getString open (when valid), and after \a timeoutMs
+    //! (<= 0: never) cancels the prompt. Arm right before the call and
+    //! disarm right after it; the timer fires inside the prompt's own
+    //! nested event loop.
+    void armPrompt(PromptKind kind, int timeoutMs, const QVariant &dialogDefault);
+    //! Stop watching; true when the prompt was cancelled by the timeout
+    //! (or by cancelPrompt()) rather than answered.
+    bool disarmPrompt();
+    //! Cancel the armed prompt now (the session's Stop button, the
+    //! timeout). Does nothing when no prompt is armed. Point and select
+    //! prompts need the version check to pass; dialogs are plain Qt.
+    void cancelPrompt();
+    //! Live (not undone) entities in the document and how many of them are
+    //! selected, counted on the engine's own list: no Plug_Entity wrappers
+    //! are allocated, so this is cheap enough to poll.
+    bool census(int *live, int *selected) const;
+    //! The graphic view's zoom factor and pixel offsets.
+    bool viewState(double *factor, int *offsetX, int *offsetY) const;
+    //! Whether the drawing's grid is shown ($GRIDMODE, as
+    //! RS_Graphic::isGridOn reads it).
+    bool gridState(bool *on) const;
+
 private:
     void pollForHatchDialog();
+    void pollPrompt();
 
     bool m_versionOk {false};
     QG_CommandWidget *m_commandWidget {nullptr};
@@ -186,6 +221,17 @@ private:
     bool m_hatchSolid {false};
     bool m_hatchDialogHandled {false};
     int m_hatchPollsLeft {0};
+
+    QWidget *m_mainWindow {nullptr};
+    QTimer *m_promptTimer {nullptr};
+    QElapsedTimer m_promptClock;
+    QPointer<QObject> m_promptAction;
+    QVariant m_promptDefault;
+    PromptKind m_promptKind {PointPrompt};
+    int m_promptTimeoutMs {0};
+    bool m_promptArmed {false};
+    bool m_promptDefaultApplied {false};
+    bool m_promptCancelled {false};
 };
 
 } // namespace lcbridge

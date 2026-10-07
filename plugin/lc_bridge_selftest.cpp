@@ -175,6 +175,18 @@ QJsonArray selfTestRequests()
     requests.append(failing(QStringLiteral("bad_args"), QStringLiteral("get_entities"),
                             {{QStringLiteral("types"), QJsonArray{QStringLiteral("SQUIGGLE")}}}));
 
+    // --- prompts: the stub answers "cancelled" at once ----------------------
+    requests.append(request(QStringLiteral("prompt_point"),
+                            {{QStringLiteral("message"), QStringLiteral("pick")},
+                             {QStringLiteral("base"), point(0.0, 0.0)}}));
+    requests.append(request(QStringLiteral("prompt_select")));
+    requests.append(request(QStringLiteral("prompt_real"),
+                            {{QStringLiteral("default"), 2.5}}));
+    requests.append(failing(QStringLiteral("bad_args"), QStringLiteral("prompt_int"),
+                            {{QStringLiteral("default"), 1.5}}));
+    requests.append(failing(QStringLiteral("unavailable"), QStringLiteral("prompt_point"),
+                            {{QStringLiteral("timeout_ms"), 100}}));
+
     // --- cleanup ----------------------------------------------------------
     requests.append(request(QStringLiteral("release_handles")));
     requests.append(request(QStringLiteral("update_view")));

@@ -74,11 +74,13 @@ SOURCES += \
     lc_pybridge.cpp \
     lc_bridge_dispatch.cpp \
     lc_bridge_native.cpp \
-    lc_bridge_server.cpp
+    lc_bridge_server.cpp \
+    lc_bridge_events.cpp
 
 HEADERS += \
     lc_pybridge.h \
     lc_bridge_dispatch.h \
     lc_bridge_native.h \
-    lc_bridge_server.h
+    lc_bridge_server.h \
+    lc_bridge_events.h
 DISTFILES += lc_pybridge.json
