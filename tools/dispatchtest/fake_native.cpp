@@ -56,4 +56,19 @@ void NativeBridge::armHatchDialog(const QString &, double, double, bool, int) {}
 void NativeBridge::disarmHatchDialog() {}
 void NativeBridge::pollForHatchDialog() {}
 
+// View control, document windows, export: unavailable like the rest.
+bool documentWindows(QList<DocumentWindow> *windows) { windows->clear(); return false; }
+bool NativeBridge::viewAvailable() const { return false; }
+bool NativeBridge::viewState(ViewState *) const { return false; }
+bool NativeBridge::zoomAuto(bool) { return false; }
+bool NativeBridge::zoomWindow(const QPointF &, const QPointF &, bool) { return false; }
+bool NativeBridge::zoomIn(double, bool, const QPointF &, bool) { return false; }
+bool NativeBridge::zoomPan(int, int) { return false; }
+bool NativeBridge::zoomPrevious() { return false; }
+bool NativeBridge::zoomPage() { return false; }
+bool NativeBridge::setView(bool, double, bool, int, int, bool, const QPointF &) { return false; }
+bool NativeBridge::hasUnsavedChanges() const { return false; }
+bool NativeBridge::exportImage(const QString &, const QString &, const QSize &, int, bool, bool, bool) { return false; }
+bool NativeBridge::exportPdf(const QString &, const QString &, int, bool, int *, QSizeF *) { return false; }
+
 } // namespace lcbridge

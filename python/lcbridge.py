@@ -7,7 +7,8 @@ Unix domain socket):
   - Document / Entity: the API scripts are meant to use. Geometry, layers,
     blocks, queries, and -- through the plugin's native layer -- real
     dimensions and hatches, selection and bounding-box reads, offset/mirror/
-    explode/trim, undo steps, save/open/new. Document.launch() starts a
+    explode/trim, undo steps, save/open/new, zoom and view, switching and
+    closing document windows, image/PDF export. Document.launch() starts a
     LibreCAD of its own, windowed or headless, with the session auto-started.
 
 Usage:
@@ -162,6 +163,40 @@ class Bridge:
     def shutdown(self) -> None:
         """End the bridge session in LibreCAD (not only this connection)."""
         self.request("shutdown")
+
+
+class _DisconnectedBridge:
+    """Stands in for the Bridge after the last drawing was closed.
+
+    There is no session to talk to any more (LibreCAD starts one only on a
+    drawing), so every request raises BridgeError("disconnected").
+    """
+
+    def __init__(self, path: str, timeout: float | None):
+        self._path = path
+        self._timeout = timeout
+
+    def request(self, op: str, **args: Any) -> Any:
+        raise BridgeError("disconnected",
+                          "the last drawing was closed; there is no bridge "
+                          "session any more (open a drawing in LibreCAD and "
+                          "start the bridge, then Document.connect())")
+
+    def request_raw(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self.request(request.get("op", ""))
+
+    def batch(self, requests: list[dict[str, Any]],
+              stop_on_error: bool = True) -> list[dict[str, Any]]:
+        return self.request("batch")
+
+    def operations(self) -> list[str]:
+        return self.request("operations")
+
+    def shutdown(self) -> None:
+        self.request("shutdown")
+
+    def close(self) -> None:
+        pass
 
 
 def iter_entities(bridge: Bridge, **args: Any) -> Iterator[dict[str, Any]]:
@@ -964,14 +999,27 @@ class Document:
         """Unique id of the bridge session this Document is connected to."""
         return str(self._bridge.request("session")["id"])
 
-    def _restart_session(self, op: str, timeout: float, **args: Any) -> None:
+    def _restart_session(self, op: str, timeout: float, **args: Any) -> Any:
+        """Run a session-ending op and reconnect to the session after it.
+
+        Returns the op's result. Two results end differently: one with
+        ``"restart": False`` (activate_document on the window already
+        served) left the session running, and one with ``"remaining": 0``
+        (file_close of the last drawing) leaves no session to reconnect to,
+        so the Document ends up disconnected.
+        """
         self._flush()
         old_id = self.session_id()
-        self._call_now(op, **args)         # acknowledged, then the session ends
+        result = self._call_now(op, **args)   # acknowledged, then the session ends
+        if isinstance(result, dict) and result.get("restart") is False:
+            return result
         socket_path = self._bridge._path
         bridge_timeout = self._bridge._timeout
         self._bridge.close()
         self._generation += 1
+        if isinstance(result, dict) and result.get("remaining") == 0:
+            self._bridge = _DisconnectedBridge(socket_path, bridge_timeout)
+            return result
         deadline = time.monotonic() + timeout
         # The new session listens on the same path, often within milliseconds,
         # so the socket's absence cannot be relied on; connect and ask instead
@@ -986,7 +1034,7 @@ class Document:
                     if probe.request("session")["id"] != old_id:
                         probe._sock.settimeout(bridge_timeout)
                         self._bridge = probe
-                        return
+                        return result
                 except (OSError, BridgeError, ProtocolError):
                     pass
                 probe.close()
@@ -1105,3 +1153,152 @@ class Document:
                        handles=[entity._handle for entity in entities],
                        pattern=pattern, scale=float(scale),
                        angle=float(angle), solid=solid)
+
+    # -- view, document windows, export (need a real LibreCAD session) ------
+    #
+    # Every zoom returns view(). None of them touch entities or the undo
+    # stack, but LibreCAD flags the drawing modified when the view changes
+    # (the view is saved in the DXF), so close_document() wants discard=True
+    # afterwards.
+
+    def view(self) -> dict[str, Any]:
+        """The view: {"factor", "offset": [px, py], "size": [w, h] pixels,
+        "visible": {"min", "max"} in drawing coordinates, "center"}."""
+        return self._call_now("get_view")
+
+    def zoom_auto(self, keep_aspect: bool = True) -> dict[str, Any]:
+        """Fit the whole drawing into the view."""
+        return self._call_now("zoom_auto", keep_aspect=keep_aspect)
+
+    def zoom_window(self, p1: Any, p2: Any,
+                    keep_aspect: bool = True) -> dict[str, Any]:
+        """Show the rectangle p1-p2 (drawing coordinates)."""
+        return self._call_now("zoom_window", p1=_pt(p1), p2=_pt(p2),
+                              keep_aspect=keep_aspect)
+
+    def zoom_in(self, factor: float = 1.137,
+                center: Any = None) -> dict[str, Any]:
+        """Zoom in by ``factor`` about ``center`` (default: the middle of
+        the view). 1.137 is the step LibreCAD's own zoom-in uses."""
+        args: dict[str, Any] = {"factor": float(factor)}
+        if center is not None:
+            args["center"] = _pt(center)
+        return self._call_now("zoom_in", **args)
+
+    def zoom_out(self, factor: float = 1.137,
+                 center: Any = None) -> dict[str, Any]:
+        """Zoom out by ``factor``; see zoom_in()."""
+        args: dict[str, Any] = {"factor": float(factor)}
+        if center is not None:
+            args["center"] = _pt(center)
+        return self._call_now("zoom_out", **args)
+
+    def zoom_pan(self, dx: int, dy: int) -> dict[str, Any]:
+        """Shift the view by pixels; positive ``dy`` moves the drawing up."""
+        return self._call_now("zoom_pan", dx=int(dx), dy=int(dy))
+
+    def zoom_previous(self) -> dict[str, Any]:
+        """Back to the view before the last zoom_auto/zoom_window/zoom_in/
+        zoom_out. LibreCAD records at most one view per half second."""
+        return self._call_now("zoom_previous")
+
+    def zoom_page(self) -> dict[str, Any]:
+        """Fit the drawing's paper (print area) into the view."""
+        return self._call_now("zoom_page")
+
+    def set_view(self, factor: float | None = None, offset: Any = None,
+                 center: Any = None) -> dict[str, Any]:
+        """Set the zoom factor (pixels per drawing unit) and either the pixel
+        ``offset`` or the drawing point to ``center`` the view on."""
+        args: dict[str, Any] = {}
+        if factor is not None:
+            args["factor"] = float(factor)
+        if offset is not None:
+            args["offset"] = _pt(offset)
+        if center is not None:
+            args["center"] = _pt(center)
+        return self._call_now("set_view", **args)
+
+    def documents(self) -> list[dict[str, Any]]:
+        """Every open document window: {"index", "path", "title",
+        "modified", "active", "parent"}. ``active`` marks the one this
+        session serves; ``parent`` is the drawing's index for a block editor
+        or print preview, None for a drawing."""
+        return self._call_now("list_documents")
+
+    def activate_document(self, index_or_path: int | str,
+                          timeout: float = 30.0) -> dict[str, Any]:
+        """Switch to another open document window and continue there.
+
+        ``index_or_path`` is an index from documents() or a drawing's file
+        path. Like open(), this ends the session and reconnects to a new one
+        on that window (Entities from before go stale) -- unless it already
+        is the session's window, which changes nothing. Returns file_info().
+        """
+        if isinstance(index_or_path, int):
+            args: dict[str, Any] = {"index": index_or_path}
+        else:
+            args = {"path": os.path.abspath(os.fspath(index_or_path))}
+        self._restart_session("activate_document", timeout, **args)
+        return self.file_info()
+
+    def close_document(self, discard: bool = False,
+                       timeout: float = 30.0) -> dict[str, Any]:
+        """Close the session's document window.
+
+        Refused (BridgeError "bad_request") when the drawing has unsaved
+        changes unless ``discard`` is set -- LibreCAD would otherwise ask in
+        a dialog. Returns {"remaining": n}. When other windows remain the
+        Document reconnects to a new session on the one LibreCAD activates;
+        after the last one it is left disconnected (``connected`` is False
+        and every call raises BridgeError "disconnected").
+        """
+        return self._restart_session("file_close", timeout,
+                                     discard=bool(discard))
+
+    @property
+    def connected(self) -> bool:
+        """False once close_document() closed the last drawing."""
+        return not isinstance(self._bridge, _DisconnectedBridge)
+
+    def export_image(self, path: str, width: int, height: int, *,
+                     format: str | None = None, border: int = 0,
+                     background: str = "white", black_white: bool = False,
+                     transparent: bool = False) -> dict[str, Any]:
+        """Render the whole drawing to an image file, as File > Export does.
+
+        The format comes from the extension (png, jpg, bmp, svg, and
+        whatever else Qt can write) unless ``format`` names it. The drawing
+        is fitted into ``width`` x ``height`` pixels less ``border`` on each
+        side. ``background`` is "white" or "black"; ``black_white`` draws
+        everything in the foreground colour; ``transparent`` (raster formats,
+        white background only) leaves the background clear.
+        """
+        args: dict[str, Any] = {
+            "path": os.path.abspath(os.fspath(path)),
+            "width": int(width), "height": int(height), "border": int(border),
+            "background": background, "black_white": black_white,
+            "transparent": transparent}
+        if format:
+            args["format"] = format
+        return self._call_now("export_image", **args)
+
+    def export_pdf(self, path: str, *, paper: str | None = None,
+                   landscape: bool | None = None,
+                   fit_to_page: bool = True) -> dict[str, Any]:
+        """Print the drawing to a PDF file, as File > Export as PDF does.
+
+        ``paper`` is "A4", "A3", "Letter", ... or None for the drawing's own
+        paper size; ``landscape`` None keeps the drawing's orientation (or
+        portrait for a named paper). ``fit_to_page`` scales the drawing onto
+        one page inside the drawing's margins; False prints at the drawing's
+        paper scale and insertion base, over as many pages as it sets up.
+        Returns {"path", "pages", "paper_mm": [w, h]}.
+        """
+        args: dict[str, Any] = {"path": os.path.abspath(os.fspath(path)),
+                                "fit_to_page": fit_to_page}
+        if paper:
+            args["paper"] = paper
+        if landscape is not None:
+            args["landscape"] = bool(landscape)
+        return self._call_now("export_pdf", **args)

@@ -9,7 +9,7 @@
 #   qmake -query QT_VERSION   # must report 5.x
 #-------------------------------------------------
 
-QT          += core gui widgets network
+QT          += core gui widgets network printsupport
 TEMPLATE     = lib
 CONFIG      += plugin c++17
 VERSION      = 0.2.0

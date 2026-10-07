@@ -178,7 +178,21 @@ def main() -> int:
                          lambda: doc.undo_checkpoint(),
                          lambda: doc.undo(),
                          lambda: doc.open("/nonexistent.dxf"),
-                         lambda: doc.new()):
+                         lambda: doc.new(),
+                         lambda: doc.view(),
+                         lambda: doc.zoom_auto(),
+                         lambda: doc.zoom_window((0, 0), (10, 10)),
+                         lambda: doc.zoom_in(),
+                         lambda: doc.zoom_out(2.0, center=(0, 0)),
+                         lambda: doc.zoom_pan(10, 10),
+                         lambda: doc.zoom_previous(),
+                         lambda: doc.zoom_page(),
+                         lambda: doc.set_view(factor=1.0),
+                         lambda: doc.documents(),
+                         lambda: doc.activate_document(0),
+                         lambda: doc.close_document(discard=True),
+                         lambda: doc.export_image("/tmp/never.png", 10, 10),
+                         lambda: doc.export_pdf("/tmp/never.pdf")):
                 try:
                     call()
                     check(False, "native op must be unavailable on the stub")
